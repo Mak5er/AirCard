@@ -28,6 +28,8 @@ extern int AMDeviceNotificationSubscribeWithOptions(
     CFDictionaryRef options);
 extern int AMDeviceNotificationUnsubscribe(AMDeviceNotificationRef subscription);
 extern CFStringRef AMDeviceCopyDeviceIdentifier(AMDeviceRef device);
+// 1 = USB, 2 = Wi-Fi.
+extern int AMDeviceGetInterfaceType(AMDeviceRef device);
 extern CFTypeRef AMDeviceCopyValue(AMDeviceRef device,
                                    CFStringRef domain,
                                    CFStringRef key);
@@ -186,7 +188,8 @@ static void EnumerateCallback(AMDeviceNotificationCallbackInfo *info,
         if ([seen[@"udid"] isEqual:udid]) return;
     }
 
-    NSMutableDictionary *entry = [@{@"udid": udid} mutableCopy];
+    NSMutableDictionary *entry = [@{@"udid": udid,
+        @"usb": @(AMDeviceGetInterfaceType(info->device) == 1)} mutableCopy];
     if (AMDeviceConnect(info->device) == 0) {
         if (!AMDeviceIsPaired(info->device)) AMDevicePair(info->device);
         if (AMDeviceValidatePairing(info->device) == 0 &&
