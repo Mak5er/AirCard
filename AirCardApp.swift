@@ -522,6 +522,7 @@ class AppViewModel: ObservableObject {
         
         loadSavedCards()
         checkDevice()
+        startDevicePolling()
     }
     
     func log(_ message: String) {
@@ -718,51 +719,84 @@ class AppViewModel: ObservableObject {
     
     // MARK: - Device Connection
     
-    func checkDevice() {
+    private var devicePollTimer: Timer?
+    private var deviceCheckStartedAt = Date.distantPast
+
+    /// Re-checks the connected device every few seconds while the app is idle,
+    /// so plugging in, unplugging or swapping an iPhone is picked up on its own.
+    func startDevicePolling() {
+        devicePollTimer?.invalidate()
+        devicePollTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, !self.isFlashing, !self.isScanningCards else { return }
+                self.checkDevice(silent: true)
+            }
+        }
+    }
+
+    func checkDevice(silent: Bool = false) {
+        // A check that hangs must never block later ones: allow a new one after 15 s.
+        if isCheckingDevice && Date().timeIntervalSince(deviceCheckStartedAt) < 15 { return }
         isCheckingDevice = true
-        statusText = "Checking connected devices..."
+        deviceCheckStartedAt = Date()
+        if !silent { statusText = "Checking connected devices..." }
         let scriptDir = self.scriptDir
-        
+        let previousUDID = device?.udid
+
         Task.detached {
             let process = Process()
             process.executableURL = AppViewModel.pythonExecutableURL
             process.environment = AppViewModel.processEnvironment
             process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
             process.arguments = ["aircard_backend.py", "--device"]
-            
+
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = Pipe()
-            
+
+            var data = Data()
+            var launchError: Error?
             do {
                 try process.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                // Kill the process if it hangs (e.g. probe on an untrusted/locked device).
+                let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 12, execute: watchdog)
+                data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                
-                if let dev = try? JSONDecoder().decode(DeviceInfo.self, from: data) {
-                    await MainActor.run {
-                        self.device = dev
-                        self.isCheckingDevice = false
-                        if dev.connected {
-                            self.statusText = "Connected to \(dev.name ?? "iPhone")"
-                            self.log("Device connected: \(dev.name ?? "iPhone") (\(dev.product ?? ""), iOS \(dev.version ?? ""))")
-                        } else if dev.error == "device_helper_missing" {
-                            self.statusText = "Device tools are missing from this build."
-                            self.log("Bundled device_helper not found — detection cannot run.")
-                        } else {
-                            self.statusText = "No iPhone found. Please connect via USB."
-                        }
-                    }
-                }
+                watchdog.cancel()
             } catch {
-                await MainActor.run {
-                    self.isCheckingDevice = false
-                    self.statusText = "Device detection failed: \(error.localizedDescription)"
+                launchError = error
+            }
+
+            let decoded = try? JSONDecoder().decode(DeviceInfo.self, from: data)
+            await MainActor.run {
+                self.isCheckingDevice = false
+                if let launchError = launchError {
+                    self.device = nil
+                    self.statusText = "Device detection failed: \(launchError.localizedDescription)"
+                    return
+                }
+                guard let dev = decoded, dev.connected else {
+                    // Empty/invalid output or no device: never keep a stale device around.
+                    if previousUDID != nil { self.log("Device disconnected.") }
+                    self.device = decoded?.error == "device_helper_missing" ? decoded : nil
+                    if decoded?.error == "device_helper_missing" {
+                        self.statusText = "Device tools are missing from this build."
+                    } else if !silent || previousUDID != nil {
+                        self.statusText = "No iPhone found. Please connect via USB."
+                    }
+                    return
+                }
+                let changed = dev.udid != previousUDID
+                self.device = dev
+                if changed {
+                    self.statusText = "Connected to \(dev.name ?? "iPhone")"
+                    self.log("Device connected: \(dev.name ?? "iPhone") (\(dev.product ?? ""), iOS \(dev.version ?? ""))")
                 }
             }
         }
     }
-    
+
     // MARK: - Live Card Scanner
     
     func toggleCardScanning() {
@@ -1706,7 +1740,7 @@ struct ContentView: View {
                     Text("AirCard")
                         .font(.title2)
                         .fontWeight(.bold)
-                    Text("v1.2.3")
+                    Text("v1.2.4")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)

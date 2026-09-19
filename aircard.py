@@ -120,8 +120,12 @@ def get_connected_device() -> dict | None:
     if not usable:
         return None
     # Enumeration order is not stable, and iPads can appear alongside the iPhone.
-    iphones = [d for d in usable if str(d["product"]).startswith("iPhone")]
-    device = (iphones or usable)[0]
+    # A Wi-Fi-paired device can be listed first while the one actually plugged in
+    # comes later, so prefer USB-attached devices before anything else.
+    usb = [d for d in usable if d.get("usb")]
+    pool = usb or usable
+    iphones = [d for d in pool if str(d["product"]).startswith("iPhone")]
+    device = (iphones or pool)[0]
 
     return {
         "udid": device["udid"],
