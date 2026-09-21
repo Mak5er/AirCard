@@ -70,6 +70,7 @@ cp build/airtraffic_host "$BIN_DIR/"
 
 # Copy python backend scripts
 cp apply_card_skin.py "$RESOURCES_DIR/"
+cp extract_card_skin.py "$RESOURCES_DIR/"
 cp aircard.py "$RESOURCES_DIR/"
 cp aircard_backend.py "$RESOURCES_DIR/"
 cp card_assets.py "$RESOURCES_DIR/"

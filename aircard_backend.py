@@ -12,6 +12,9 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -56,6 +59,7 @@ from aircard import (
     load_saved_cards,
     save_cards,
 )
+from extract_card_skin import extract_file
 
 
 def cmd_device():
@@ -124,6 +128,163 @@ def cmd_prepare_image(src: str, dst: str):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def _find_asset_metadata(value, asset_name=None):
+    if isinstance(value, dict):
+        candidate = value.get("url")
+        if isinstance(candidate, str) and candidate:
+            return asset_name, candidate
+        for child_name, child in value.items():
+            found = _find_asset_metadata(child, child_name)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_asset_metadata(child, asset_name)
+            if found:
+                return found
+    return None
+
+
+CARD_ARTWORK_LEAVES = (
+    "cardBackgroundCombined@2x.png",
+    "cardBackgroundCombined@3x.png",
+    "cardBackgroundCombined.pdf",
+)
+
+
+def _metadata_asset_leaf(asset_name: str | None) -> str | None:
+    """Return a known artwork filename when a .urls entry names one."""
+    if not asset_name:
+        return None
+    filename = Path(asset_name).name
+    return filename if filename in CARD_ARTWORK_LEAVES else None
+
+
+def _read_card_metadata(udid: str, card_hash: str, output: Path):
+    """Read live artwork URL metadata without making it a prerequisite for previewing."""
+    target_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
+    errors = []
+    for leaf in ("cardBackgroundCombined.png.urls", "cardBackgroundCombined.pdf.urls"):
+        metadata_path = output / f"{card_hash}_{leaf}"
+        extract_errors = []
+        if not extract_file(udid, f"{target_dir}/{leaf}", str(metadata_path), error_out=extract_errors):
+            errors.extend(f"{leaf}: {error}" for error in extract_errors)
+            continue
+        try:
+            metadata = _find_asset_metadata(json.loads(metadata_path.read_text("utf-8")))
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f"{leaf}: invalid metadata: {error}")
+            continue
+        if metadata:
+            asset_name, source_url = metadata
+            return _metadata_asset_leaf(asset_name), source_url, errors
+        errors.append(f"{leaf}: metadata contains no asset URL")
+    return None, None, errors
+
+
+def cmd_extract_card(udid: str, card_hash: str, output_dir: str):
+    """Extract the card's active artwork, preserving its original asset variant."""
+    output = Path(output_dir).expanduser()
+    output.mkdir(parents=True, exist_ok=True)
+    target_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
+
+    metadata_leaf, source_url, errors = _read_card_metadata(udid, card_hash, output)
+    # Metadata identifies the exact source asset when available. Only cards
+    # without a usable name fall back through the supported artwork variants.
+    image_leaves = ([metadata_leaf] if metadata_leaf else []) + [
+        leaf for leaf in CARD_ARTWORK_LEAVES if leaf != metadata_leaf
+    ]
+    source_path = None
+    source_filename = None
+    for image_leaf in image_leaves:
+        candidate = output / f"{card_hash}_{image_leaf}"
+        image_errors = []
+        if extract_file(udid, f"{target_dir}/{image_leaf}", str(candidate), error_out=image_errors):
+            source_path = candidate
+            source_filename = image_leaf
+            break
+        errors.extend(f"{image_leaf}: {error}" for error in image_errors)
+
+    if source_path is None or source_filename is None:
+        print(json.dumps({
+            "ok": False,
+            "error": "Card skin could not be extracted",
+            "details": errors,
+        }))
+        return
+
+    image_path = source_path
+    if source_filename.endswith(".pdf"):
+        image_path = output / f"{card_hash}_preview.png"
+        try:
+            subprocess.run(
+                ["/usr/bin/sips", "-s", "format", "png", str(source_path), "--out", str(image_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as error:
+            print(json.dumps({"ok": False, "error": f"Could not render PDF card skin: {error}"}))
+            return
+
+    print(json.dumps({
+        "ok": True,
+        "image_path": str(image_path),
+        "source_path": str(source_path),
+        "source_filename": source_filename,
+        "url": source_url,
+    }))
+    sys.stdout.flush()
+
+
+def _read_original_card_url(udid: str, card_hash: str, output: Path) -> tuple[str, str]:
+    """Read the card's live URL metadata from the device and return its asset name and URL."""
+    asset_name, source_url, errors = _read_card_metadata(udid, card_hash, output)
+    if source_url:
+        return asset_name or "original card skin", source_url
+    raise RuntimeError("Could not read an original card-image URL: " + "; ".join(errors))
+
+
+def cmd_restore_card(udid: str, card_hash: str) -> bool:
+    """Fetch the original source image from live card metadata and flash it immediately."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="aircard-restore-") as temporary:
+            work = Path(temporary)
+            asset_name, source_url = _read_original_card_url(udid, card_hash, work)
+            parsed = urllib.parse.urlparse(source_url)
+            if parsed.scheme not in {"http", "https"}:
+                raise RuntimeError(f"Unsupported original image URL scheme: {parsed.scheme or 'none'}")
+
+            print(json.dumps({
+                "type": "progress",
+                "message": f"Downloading original card skin from {asset_name}..."
+            }))
+            print(json.dumps({"type": "progress", "message": f"Original card skin URL: {source_url}"}))
+            sys.stdout.flush()
+            download_path = work / "original-source"
+            request = urllib.request.Request(source_url, headers={"User-Agent": "AirCard/1.0"})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                payload = response.read()
+            if not payload:
+                raise RuntimeError("The original image download was empty")
+            download_path.write_bytes(payload)
+
+            prepared_path = work / "original-card.png"
+            subprocess.run(
+                ["/usr/bin/sips", "-s", "format", "png", str(download_path), "--out", str(prepared_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if not prepared_path.is_file() or prepared_path.stat().st_size == 0:
+                raise RuntimeError("Could not convert the downloaded original image to PNG")
+            return cmd_flash(udid, card_hash, str(prepared_path))
+    except Exception as error:
+        print(json.dumps({"type": "error", "message": f"Original card skin restore failed: {error}"}))
+        sys.stdout.flush()
+        return False
+
+
 def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
     img_path = Path(image_path)
     if not img_path.is_file():
@@ -136,7 +297,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         print(json.dumps({
             "type": "error",
             "card": card_hash,
-            "message": "Failed to prepare card artwork"
+            "message": "Failed to prepare card skin"
         }))
         sys.stdout.flush()
         return False
@@ -570,8 +731,13 @@ def main():
         cmd_save_cards(sys.argv[2])
     elif norm_cmd == "prepare-image" and len(sys.argv) > 3:
         cmd_prepare_image(sys.argv[2], sys.argv[3])
+    elif norm_cmd == "extract-card" and len(sys.argv) > 3:
+        cmd_extract_card(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else str(Path.cwd()))
     elif norm_cmd == "flash" and len(sys.argv) > 4:
         if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4]):
+            sys.exit(1)
+    elif norm_cmd == "restore-card" and len(sys.argv) > 3:
+        if not cmd_restore_card(sys.argv[2], sys.argv[3]):
             sys.exit(1)
     elif norm_cmd == "inspect-passthm" and len(sys.argv) > 2:
         cmd_inspect_passthm(sys.argv[2])

@@ -1047,6 +1047,20 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[5]],
                     [NSString stringWithUTF8String:argv[6]],
                 ]);
+            } else if ([command isEqual:@"read-file"] && argc == 5) {
+                NSString *remotePath = [NSString stringWithUTF8String:argv[3]];
+                NSString *localPath = [NSString stringWithUTF8String:argv[4]];
+                NSData *data = AFCReadFileWithLimit(session.afc, remotePath, 512 * 1024 * 1024);
+                if (data) {
+                    NSError *error = nil;
+                    if ([data writeToFile:localPath options:0 error:&error]) {
+                        operation = @{ @"ok": @YES, @"size": @(data.length) };
+                    } else {
+                        operation = @{ @"ok": @NO, @"error": error.localizedDescription ?: @"write failed" };
+                    }
+                } else {
+                    operation = @{ @"ok": @NO, @"error": @"read failed" };
+                }
             }
         }
 

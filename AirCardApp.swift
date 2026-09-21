@@ -19,6 +19,8 @@ struct CardItem: Identifiable, Hashable {
     var isSelected: Bool = true
     var customImageURL: URL? = nil
     var customImage: NSImage? = nil
+    var deviceImage: NSImage? = nil
+    var isExtractingDeviceImage = false
     
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
@@ -496,6 +498,7 @@ class AppViewModel: ObservableObject {
     @Published var showLogs = false
     
     private var scanProcess: Process?
+    private var extractionTasks: [String: Task<Void, Never>] = [:]
     private let scriptDir: String
     private let storageKey = "mak5er.aircard.savedCards"
     private let legacyStorageKey1 = "mak5er.savedCards"
@@ -859,7 +862,9 @@ class AppViewModel: ObservableObject {
                                     if dummyHashes.contains(candidate) { continue }
                                     
                                     await MainActor.run {
-                                        if !self.cards.contains(where: { $0.id == candidate }) {
+                                        if let existingIndex = self.cards.firstIndex(where: { $0.id == candidate }) {
+                                            // do nothing automatically
+                                        } else {
                                             self.cards.append(CardItem(id: candidate, isSelected: true))
                                             self.saveCards()
                                             self.log("Found card: \(candidate)")
@@ -889,6 +894,249 @@ class AppViewModel: ObservableObject {
         }
         saveCards()
         log("Scanning stopped. Total cards: \(cards.count).")
+    }
+
+    func extractCurrentCardImage(for cardId: String) {
+        guard let udid = device?.udid,
+              let index = cards.firstIndex(where: { $0.id == cardId }) else { return }
+
+        extractionTasks[cardId]?.cancel()
+
+        cards[index].isExtractingDeviceImage = true
+        let scriptDir = self.scriptDir
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aircard_extract_\(UUID().uuidString)", isDirectory: true)
+
+        let task = Task.detached { [weak self] in
+            defer { try? FileManager.default.removeItem(at: outputDir) }
+
+            let process = Process()
+            process.executableURL = AppViewModel.pythonExecutableURL
+            process.environment = AppViewModel.processEnvironment
+            process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+            process.arguments = ["aircard_backend.py", "--extract-card", udid, cardId, outputDir.path]
+            let pipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = errorPipe
+
+            do {
+                try process.run()
+
+                let (data, errorData) = await withTaskCancellationHandler(
+                    operation: {
+                        let d = pipe.fileHandleForReading.readDataToEndOfFile()
+                        let e = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                        process.waitUntilExit()
+                        return (d, e)
+                    },
+                    onCancel: { process.terminate() }
+                )
+
+                if Task.isCancelled {
+                    await MainActor.run {
+                        if let self,
+                           let currentIndex = self.cards.firstIndex(where: { $0.id == cardId }) {
+                            self.cards[currentIndex].isExtractingDeviceImage = false
+                        }
+                        self?.extractionTasks.removeValue(forKey: cardId)
+                    }
+                    return
+                }
+
+                let outputLines = String(data: data, encoding: .utf8)?.split(whereSeparator: \.isNewline).reversed() ?? []
+                let jsonData = outputLines.first.flatMap { String($0).data(using: .utf8) } ?? data
+                guard let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                      json["ok"] as? Bool == true,
+                      let imagePath = json["image_path"] as? String else {
+                    await MainActor.run {
+                        guard let self else { return }
+                        if let currentIndex = self.cards.firstIndex(where: { $0.id == cardId }) {
+                            self.cards[currentIndex].isExtractingDeviceImage = false
+                        }
+                        self.extractionTasks.removeValue(forKey: cardId)
+                        self.log("Could not read current card skin for \(cardId.prefix(12))... (exit \(process.terminationStatus))")
+                        let stdout = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let stderr = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        if !stdout.isEmpty { self.log("  backend: \(stdout.prefix(500))") }
+                        if !stderr.isEmpty { self.log("  stderr: \(stderr.prefix(500))") }
+                    }
+                    return
+                }
+
+                await MainActor.run {
+                    guard let self else { return }
+                    self.extractionTasks.removeValue(forKey: cardId)
+                    guard let currentIndex = self.cards.firstIndex(where: { $0.id == cardId }) else { return }
+                    guard let image = NSImage(contentsOfFile: imagePath) else {
+                        self.cards[currentIndex].isExtractingDeviceImage = false
+                        self.log("Extracted file is not a readable image: \(imagePath)")
+                        return
+                    }
+                    self.cards[currentIndex].deviceImage = image
+                    self.cards[currentIndex].isExtractingDeviceImage = false
+                    self.log("Read current card skin for \(cardId.prefix(12))...")
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.extractionTasks.removeValue(forKey: cardId)
+                    if let currentIndex = self.cards.firstIndex(where: { $0.id == cardId }) {
+                        self.cards[currentIndex].isExtractingDeviceImage = false
+                    }
+                    if !Task.isCancelled {
+                        self.log("Current card skin read failed: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+        extractionTasks[cardId] = task
+    }
+
+    func cancelCardImageExtraction(for cardId: String) {
+        extractionTasks[cardId]?.cancel()
+        extractionTasks.removeValue(forKey: cardId)
+        if let index = cards.firstIndex(where: { $0.id == cardId }) {
+            cards[index].isExtractingDeviceImage = false
+        }
+        log("Cancelled card skin loading for \(cardId.prefix(12))...")
+    }
+
+    func extractImagesForSavedCards() {
+        guard device?.connected == true else { return }
+        let pending = cards.filter { $0.deviceImage == nil && !$0.isExtractingDeviceImage }
+        guard !pending.isEmpty else { return }
+        log("Auto-loading current card skin for \(pending.count) saved card(s)...")
+        for card in pending {
+            extractCurrentCardImage(for: card.id)
+        }
+    }
+
+    func restoreOriginalCard(for cardId: String) {
+        guard let udid = device?.udid,
+              cards.contains(where: { $0.id == cardId }) else {
+            errorMessage = "Connect an iPhone before restoring the original card skin."
+            return
+        }
+
+        isFlashing = true
+        showLogs = true
+        statusText = "Restoring original card skin..."
+        log("Reading the card's live URL metadata and restoring \(cardId.prefix(12))...")
+        let scriptDir = self.scriptDir
+
+        Task.detached {
+            let process = Process()
+            process.executableURL = AppViewModel.pythonExecutableURL
+            process.environment = AppViewModel.processEnvironment
+            process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+            process.arguments = ["aircard_backend.py", "--restore-card", udid, cardId]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let output = String(data: data, encoding: .utf8) ?? ""
+                let messages = output.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+                    guard let lineData = String(line).data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { return nil }
+                    return json["message"] as? String
+                }
+                await MainActor.run {
+                    for message in messages { self.log("  \(message)") }
+                    self.isFlashing = false
+                if process.terminationStatus == 0 {
+                    self.statusText = "Original card skin restored."
+                    self.log("Original card skin restored successfully.")
+                    self.clearCardImage(for: cardId)
+                    if let index = self.cards.firstIndex(where: { $0.id == cardId }) {
+                        self.cards[index].deviceImage = nil
+                    }
+                    } else {
+                        self.statusText = "Failed to restore original card skin."
+                        self.errorMessage = "The original card skin could not be flashed. Check the log."
+                        self.log("Original card skin restore failed (exit \(process.terminationStatus)).")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isFlashing = false
+                    self.statusText = "Failed to restore original card skin."
+                    self.errorMessage = error.localizedDescription
+                    self.log("Original card skin restore failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func downloadCurrentCardImage(for cardId: String) {
+        guard let udid = device?.udid else {
+            errorMessage = "Connect an iPhone before downloading the current card skin."
+            return
+        }
+
+        let scriptDir = self.scriptDir
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aircard_download_\(UUID().uuidString)", isDirectory: true)
+        showLogs = true
+        log("Downloading the current card skin for \(cardId.prefix(12))...")
+
+        Task.detached {
+            defer { try? FileManager.default.removeItem(at: outputDir) }
+            let process = Process()
+            process.executableURL = AppViewModel.pythonExecutableURL
+            process.environment = AppViewModel.processEnvironment
+            process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+            process.arguments = ["aircard_backend.py", "--extract-card", udid, cardId, outputDir.path]
+            let pipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = errorPipe
+
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                _ = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let outputLines = String(data: data, encoding: .utf8)?.split(whereSeparator: \.isNewline).reversed() ?? []
+                let jsonData = outputLines.first.flatMap { String($0).data(using: .utf8) } ?? data
+                guard let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                      json["ok"] as? Bool == true,
+                      let sourcePath = json["source_path"] as? String,
+                      let sourceFilename = json["source_filename"] as? String else {
+                    throw NSError(
+                        domain: "AirCard",
+                        code: Int(process.terminationStatus),
+                        userInfo: [NSLocalizedDescriptionKey: "Could not read the current card skin from the iPhone"]
+                    )
+                }
+
+                let sourceURL = URL(fileURLWithPath: sourcePath)
+                let destinationURL: URL? = await MainActor.run {
+                    let panel = NSSavePanel()
+                    panel.allowedContentTypes = [.png, .pdf, .image]
+                    panel.canCreateDirectories = true
+                    panel.nameFieldStringValue = sourceFilename
+                    panel.message = "Choose where to save the current card skin from your iPhone"
+                    return panel.runModal() == .OK ? panel.url : nil
+                }
+                guard let destinationURL else { return }
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    try FileManager.default.removeItem(at: destinationURL)
+                }
+                try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+                await MainActor.run {
+                    self.log("Downloaded current card skin: \(destinationURL.path)")
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Could not download current card skin: \(error.localizedDescription)"
+                }
+            }
+        }
     }
     
     // MARK: - Skin Application
@@ -1376,7 +1624,11 @@ struct WalletCardView: View {
     let cardIndex: Int
     let onPickImage: () -> Void
     let onClearImage: () -> Void
+    let onRestoreOriginal: () -> Void
+    let onDownloadCurrent: () -> Void
     let onDelete: () -> Void
+    let onCancelExtraction: () -> Void
+    let onRefresh: () -> Void
     
     @State private var isHovered = false
     @State private var isTargeted = false
@@ -1433,6 +1685,43 @@ struct WalletCardView: View {
                                 .padding(.bottom, 12)
                             }
                         }
+                    }
+                } else if let img = card.deviceImage {
+                    ZStack(alignment: .topLeading) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 290, height: 182)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        Text("Current Phone Card Skin")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.55))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .padding(10)
+                    }
+                } else if card.isExtractingDeviceImage {
+                    ZStack(alignment: .topTrailing) {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color(NSColor.controlBackgroundColor))
+                        VStack(spacing: 8) {
+                            ProgressView()
+                            Text("Reading current card skin...")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        
+                        Button(action: onCancelExtraction) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundStyle(.secondary, Color(NSColor.controlBackgroundColor))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(10)
+                        .help("Cancel loading")
                     }
                 } else {
                     // Empty / Placeholder Card Mockup
@@ -1578,12 +1867,36 @@ struct WalletCardView: View {
                 Spacer()
                 
                 // Status badge
-                if card.customImage != nil {
+                if card.customImage != nil || card.deviceImage != nil {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(.green)
                         .font(.system(size: 12))
-                        .help("Skin assigned and ready")
+                        .help(card.customImage != nil ? "Skin assigned and ready" : "Current phone card skin read")
                 }
+
+                Button(action: onRefresh) {
+                    Image(systemName: "eye")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh card skin from iPhone")
+
+                Button(action: onDownloadCurrent) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("Download the current card skin from the iPhone")
+
+                Button(action: onRestoreOriginal) {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("Download and restore the original card skin from live URL metadata")
                 
                 // Delete button
                 Button(action: onDelete) {
@@ -1670,7 +1983,11 @@ struct ContentView: View {
                                     cardIndex: idx,
                                     onPickImage: { openCardImagePicker(for: vm.cards[idx].id) },
                                     onClearImage: { vm.clearCardImage(for: vm.cards[idx].id) },
-                                    onDelete: { vm.deleteCard(id: vm.cards[idx].id) }
+                                    onRestoreOriginal: { vm.restoreOriginalCard(for: vm.cards[idx].id) },
+                                    onDownloadCurrent: { vm.downloadCurrentCardImage(for: vm.cards[idx].id) },
+                                    onDelete: { vm.deleteCard(id: vm.cards[idx].id) },
+                                    onCancelExtraction: { vm.cancelCardImageExtraction(for: vm.cards[idx].id) },
+                                    onRefresh: { vm.extractCurrentCardImage(for: vm.cards[idx].id) }
                                 )
                             }
                         }
@@ -3278,7 +3595,7 @@ struct ContentView: View {
             vm.setCardImage(for: cardId, url: url)
         }
     }
-    
+
     private func openBulkImagePicker() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]

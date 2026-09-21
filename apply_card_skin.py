@@ -345,7 +345,7 @@ def write_files_batch(
 
 
 def invalidate_cache(udid: str, card_hash: str) -> bool:
-    """Invalidates card image cache by corrupting cache leaves in .cache and .pkcache."""
+    """Invalidates card skin cache by corrupting cache leaves in .cache and .pkcache."""
     any_ok = False
     cache_leaves = [("FrontFace", b"corrupted"), ("PlaceHolder", b"corrupted"), ("Preview", b"corrupted")]
     for ext in [".cache", ".pkcache"]:
@@ -381,7 +381,7 @@ def main():
         target_dir = f"/var/mobile/Library/Passes/Cards/{h}.pkpass"
         print(f"\n[{index}/{len(hashes)}] Processing card: {h}")
 
-        print("  -> Writing card artwork (fast batch)...")
+        print("  -> Writing card skin (fast batch)...")
         card_assets = [
             ("cardBackgroundCombined@3x.png", img_data),
             ("cardBackgroundCombined@2x.png", img_data),
