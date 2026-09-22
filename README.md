@@ -12,12 +12,15 @@
 
 ## Features
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Wallet cards.
+- 🌈 **Payment Card Text Colors:** Customize the payment card number and `CARD` label colors without changing payment identifiers or device-specific payment data.
+- 🔢 **Card Number Suffix:** Set exactly four displayed digits, or enter `NULL` to hide the card number.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular `.passthm` themes directly to iOS 18+ lockscreen.
 - 🧩 **Passcode Theme Creator:** Create custom themes from a single wallpaper (Seamless Poster Slicing) or build key-by-key (Individual Keys).
 - 🔍 **Interactive Photo Framing:** Pan and zoom artwork directly inside keypad buttons with real-time iPhone preview.
 - ✏️ **Edit Existing .passthm Themes:** Open any Cowabunga or Nugget theme package directly in the creator, tweak button artwork, reposition photos, and re-export or flash.
 - ⚡ **Per-Card & Bulk Customization:** Set unique artwork for each card or apply one design across all cards with a single click.
 - 📱 **Zero-Hassle Card Detection:** Tap any card in your iPhone's Wallet app to detect its hash in real-time.
+- 💾 **Explicit Per-Card Backups:** Choose where to save current artwork, colors, and card-number suffix before making changes.
 - 🚀 **100% Standalone (Universal):** Native support for both **Apple Silicon** and **Intel (x86)** Macs. All required device-communication utilities and image engines are pre-bundled inside the app.
 - 📦 **Zero Prerequisites:** No Homebrew, Python packages, or terminal setup required for macOS users.
 
@@ -42,15 +45,31 @@
 ---
 
 ## How to Customize Apple Wallet Cards
+
+> [!WARNING]
+> **Colors, card-number suffixes, and Backup access the live Wallet database.**
+> They can temporarily make cards disappear or corrupt the database. Continue
+> only if you accept the risk. Artwork-only changes do not access this database.
+>
+> Backup ZIPs contain only artwork and `wallet-style.json`, never database files
+> or `pass.json`.
+>
+> **If cards disappear:** stop retrying, restart the iPhone, open Wallet, wait
+> briefly, swipe Wallet away, then open it again. This worked repeatedly in
+> real-device tests, but recovery is not guaranteed.
+
 1. Connect your iPhone to your Mac via USB cable and ensure it is unlocked and trusted.
 2. In AirCard, stay on the **Wallet Cards** tab and click **Scan Cards**.
 3. On your iPhone:
    - **Double-click the Side (Power) button** to open Apple Pay.
    - Authenticate with **Face ID**.
    - **Tap your card** (or tap it once more) to trigger instant detection!
-4. Click on any card mockup or drag & drop an image directly onto the card.
-5. Click **Flash Skins**.
-6. Force-close the **Wallet** app on your iPhone from the App Switcher (or reboot) to see your new custom card design!
+4. Optionally click **Backup** on a detected card and choose where to save its current artwork and Wallet database style.
+5. Click on any card mockup or drag & drop an image directly onto the card.
+6. Use the **Digits** and **CARD label** color pickers when you only want to change Wallet text colors. These settings are available with or without a custom image.
+7. Enter exactly four ASCII digits for the card-number suffix, or enter `NULL` to hide the card number. Blank input is not treated as `NULL`.
+8. Click **Flash Skins** and review the database warning when colors or the card-number suffix are selected.
+9. For database changes, fully restart the iPhone; reopening Wallet is not enough. For artwork-only changes, force-close and reopen Wallet.
 
 ---
 
