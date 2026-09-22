@@ -8,7 +8,9 @@ import json
 import os
 import plistlib
 import posixpath
+import re
 import secrets
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -16,6 +18,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -26,6 +29,38 @@ SOURCE_PREFIX = "airlift-src-"
 LINK_PREFIX = "airlift-link-"
 RECOVERED_PREFIX = "airlift-recovered-"
 SZ_EXTRA_ID = 0x5A53
+CARD_HASH_RE = re.compile(r"^[A-Za-z0-9_+=-]{20,44}$")
+DEFAULT_EXTRACT_LIMIT = 16 * 1024 * 1024
+EXTRACT_LIMITS = {
+    "passes23.sqlite": 128 * 1024 * 1024,
+    "passes23.sqlite-journal": 128 * 1024 * 1024,
+    "passes23.sqlite-wal": 128 * 1024 * 1024,
+    "passes23.sqlite-shm": 8 * 1024 * 1024,
+}
+EXTRACT_ALLOWED_LEAVES = frozenset(
+    {
+        "cardBackgroundCombined@3x.png",
+        "cardBackgroundCombined@2x.png",
+        "cardBackgroundCombined.pdf",
+        *EXTRACT_LIMITS,
+    }
+)
+WALLET_DB_TARGET = "/var/mobile/Library/Passes"
+WALLET_DB_LEAF = "passes23.sqlite"
+WALLET_DB_SIDECARS = (
+    "passes23.sqlite-journal",
+    "passes23.sqlite-wal",
+    "passes23.sqlite-shm",
+)
+WALLET_DB_UNCHANGED = object()
+
+
+class WalletDBPrewriteChangedError(RuntimeError):
+    """Raised when the live database no longer matches the prepared snapshot."""
+
+
+class ExtractionRestoreError(RuntimeError):
+    """Raised when extraction recovery cannot be verified safely."""
 
 
 def zip_info(name: str, mode: int) -> zipfile.ZipInfo:
@@ -179,6 +214,11 @@ def operation_ok(result: dict) -> bool:
     )
 
 
+def validate_card_hash(card_hash: str) -> None:
+    if not CARD_HASH_RE.fullmatch(card_hash):
+        raise ValueError("invalid card hash")
+
+
 def write_file(udid: str, target: str, leaf: str, payload: bytes, retries: int = 3) -> bool:
     for attempt in range(1, max(1, retries) + 1):
         try:
@@ -189,6 +229,8 @@ def write_file(udid: str, target: str, leaf: str, payload: bytes, retries: int =
 
             link_identifier = f"../../{source}/p0/p1/p2/link"
             payload_identifier = f"../../{source}/payload"
+            cleanup_attempted = False
+            finish: dict = {}
 
             # Step 1: move link to media
             # Step 2: move new payload into link/leaf (atomically creates or overwrites target)
@@ -215,40 +257,48 @@ def write_file(udid: str, target: str, leaf: str, payload: bytes, retries: int =
                         continue
                     return False
 
-                stage = native(
-                    "stage",
-                    udid,
-                    source,
-                    link_destination,
-                    recovered,
-                    os.fspath(archive_path),
-                    os.fspath(books_path),
-                    os.fspath(snapshot_root),
-                )
-                if not operation_ok(stage):
-                    if attempt < retries:
-                        time.sleep(0.3 * attempt)
-                        continue
-                    return False
+                atc: dict = {}
+                try:
+                    cleanup_attempted = True
+                    stage = native(
+                        "stage",
+                        udid,
+                        source,
+                        link_destination,
+                        recovered,
+                        os.fspath(archive_path),
+                        os.fspath(books_path),
+                        os.fspath(snapshot_root),
+                    )
+                    if not operation_ok(stage):
+                        atc = {}
+                    else:
+                        atc_cmd = [os.fspath(AIRTRAFFIC_HOST), udid]
+                        for identifier, destination in zip(identifiers, destinations):
+                            atc_cmd.extend((identifier, destination))
+                        atc = run_json(atc_cmd, timeout=120)
+                finally:
+                    if cleanup_attempted:
+                        try:
+                            finish = native(
+                                "finish-write",
+                                udid,
+                                source,
+                                link_destination,
+                                recovered,
+                                os.fspath(snapshot_root),
+                            )
+                        except Exception:
+                            finish = {}
 
-                atc_cmd = [os.fspath(AIRTRAFFIC_HOST), udid]
-                for identifier, destination in zip(identifiers, destinations):
-                    atc_cmd.extend((identifier, destination))
-                atc = run_json(atc_cmd, timeout=120)
-
-                finish = native(
-                    "finish-write",
-                    udid,
-                    source,
-                    link_destination,
-                    recovered,
-                    os.fspath(snapshot_root),
-                )
-
-            ok = bool(atc.get("exitCode") == 0 and atc.get("ok") and operation_ok(finish))
+            if cleanup_attempted and not operation_ok(finish):
+                return False
+            ok = bool(atc.get("exitCode") == 0 and atc.get("ok"))
             if ok:
                 return True
         except Exception:
+            if cleanup_attempted and not operation_ok(finish):
+                return False
             pass
 
         if attempt < retries:
@@ -273,6 +323,8 @@ def write_files_batch(
             source = f"{SOURCE_PREFIX}{token}"
             link_destination = f"{LINK_PREFIX}{token}"
             recovered = f"{RECOVERED_PREFIX}{token}"
+            cleanup_attempted = False
+            finish: dict = {}
 
             link_identifier = f"../../{source}/p0/p1/p2/link"
             identifiers = [link_identifier]
@@ -299,51 +351,705 @@ def write_files_batch(
                         continue
                     return False
 
-                stage = native(
-                    "stage",
-                    udid,
-                    source,
-                    link_destination,
-                    recovered,
-                    os.fspath(archive_path),
-                    os.fspath(books_path),
-                    os.fspath(snapshot_root),
-                )
-                if not operation_ok(stage):
-                    if attempt < retries:
-                        time.sleep(0.4 * attempt)
-                        continue
-                    return False
+                atc: dict = {}
+                try:
+                    cleanup_attempted = True
+                    stage = native(
+                        "stage",
+                        udid,
+                        source,
+                        link_destination,
+                        recovered,
+                        os.fspath(archive_path),
+                        os.fspath(books_path),
+                        os.fspath(snapshot_root),
+                    )
+                    if not operation_ok(stage):
+                        atc = {}
+                    else:
+                        atc_cmd = [os.fspath(AIRTRAFFIC_HOST), udid]
+                        for identifier, destination in zip(identifiers, destinations):
+                            atc_cmd.extend((identifier, destination))
 
-                atc_cmd = [os.fspath(AIRTRAFFIC_HOST), udid]
-                for identifier, destination in zip(identifiers, destinations):
-                    atc_cmd.extend((identifier, destination))
+                        timeout = max(120, len(files) * 2)
+                        if progress_callback:
+                            atc = run_json_streaming(
+                                atc_cmd,
+                                timeout=timeout,
+                                on_progress=progress_callback,
+                            )
+                        else:
+                            atc = run_json(atc_cmd, timeout=timeout)
+                finally:
+                    if cleanup_attempted:
+                        try:
+                            finish = native(
+                                "finish-write",
+                                udid,
+                                source,
+                                link_destination,
+                                recovered,
+                                os.fspath(snapshot_root),
+                            )
+                        except Exception:
+                            finish = {}
 
-                timeout = max(120, len(files) * 2)
-                if progress_callback:
-                    atc = run_json_streaming(atc_cmd, timeout=timeout, on_progress=progress_callback)
-                else:
-                    atc = run_json(atc_cmd, timeout=timeout)
-
-                finish = native(
-                    "finish-write",
-                    udid,
-                    source,
-                    link_destination,
-                    recovered,
-                    os.fspath(snapshot_root),
-                )
-
-            ok = bool(atc.get("exitCode") == 0 and atc.get("ok") and operation_ok(finish))
+            if cleanup_attempted and not operation_ok(finish):
+                return False
+            ok = bool(atc.get("exitCode") == 0 and atc.get("ok"))
             if ok:
                 return True
         except Exception:
+            if cleanup_attempted and not operation_ok(finish):
+                return False
             pass
 
         if attempt < retries:
             time.sleep(0.4 * attempt)
 
     return False
+
+
+def extract_file(
+    udid: str,
+    target: str,
+    leaf: str,
+    output_path: str,
+    retries: int = 3,
+    raise_errors: bool = False,
+) -> bytes | None:
+    """Read one existing device file, restoring all staging state afterward."""
+    normalized_target = posixpath.normpath(target)
+    if (
+        leaf not in EXTRACT_ALLOWED_LEAVES
+        or (
+            normalized_target != WALLET_DB_TARGET
+            and not normalized_target.startswith(f"{WALLET_DB_TARGET}/")
+        )
+    ):
+        raise ValueError("unsupported extraction target")
+    target = normalized_target
+    target_path = posixpath.join(target, leaf)
+    last_error: Exception | None = None
+    for attempt in range(1, max(1, retries) + 1):
+        token = secrets.token_hex(10)
+        source = f"{SOURCE_PREFIX}{token}"
+        link_destination = f"{LINK_PREFIX}{token}"
+        recovered = f"{RECOVERED_PREFIX}{token}"
+        link_identifier = f"../../{source}/p0/p1/p2/link"
+        target_identifier = posixpath.relpath(target_path, AIRLOCK_ROOT)
+        canary = f"airlift extract\nnonce={secrets.token_hex(24)}\n".encode()
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="airlift-extract-") as temporary:
+                work = Path(temporary)
+                archive_path = work / "payload.zip"
+                books_path = work / "Books.plist"
+                snapshot_root = work / "books-snapshot"
+                output = Path(output_path)
+                snapshot_root.mkdir()
+                archive_path.write_bytes(build_archive(target, canary))
+                books_path.write_bytes(build_books([link_identifier, target_identifier]))
+                cleanup_attempted = False
+                staging_cleanup_complete = False
+                relocation_attempted = False
+                target_missing = False
+                recovery_complete = False
+                recovery_detail = "restore was not attempted"
+                extracted_data: bytes | None = None
+
+                snapshot = native("snapshot-books", udid, os.fspath(snapshot_root))
+                if not operation_ok(snapshot):
+                    raise RuntimeError("failed to snapshot Books state")
+
+                try:
+                    cleanup_attempted = True
+                    stage = native(
+                        "stage",
+                        udid,
+                        source,
+                        link_destination,
+                        recovered,
+                        os.fspath(archive_path),
+                        os.fspath(books_path),
+                        os.fspath(snapshot_root),
+                    )
+                    if not operation_ok(stage):
+                        raise RuntimeError("failed to stage extraction")
+
+                    relocation_attempted = True
+                    atc = run_json(
+                        [
+                            os.fspath(AIRTRAFFIC_HOST),
+                            udid,
+                            link_identifier,
+                            link_destination,
+                            target_identifier,
+                            recovered,
+                        ],
+                        timeout=120,
+                    )
+                    if atc.get("exitCode") != 0 or not atc.get("ok"):
+                        if (
+                            atc.get("exitCode") == 5
+                            and atc.get("missingCount") == 1
+                        ):
+                            target_missing = True
+                            raise FileNotFoundError(
+                                f"{leaf} file not found"
+                            )
+                        raise RuntimeError(
+                            f"AirTraffic failed to extract {leaf}"
+                        )
+
+                    extracted = native(
+                        "extract", udid, recovered, leaf, os.fspath(output)
+                    )
+                    if not operation_ok(extracted):
+                        reason = extracted.get("operation", {}).get(
+                            "reason", "AFC extraction failed"
+                        )
+                        if reason == "file not found":
+                            if leaf in WALLET_DB_SIDECARS:
+                                target_missing = True
+                            raise FileNotFoundError(
+                                f"{leaf} file not found"
+                            )
+                        raise RuntimeError(reason)
+
+                    extracted_data = output.read_bytes()
+                    size_limit = EXTRACT_LIMITS.get(leaf, DEFAULT_EXTRACT_LIMIT)
+                    empty_allowed = leaf in {
+                        "passes23.sqlite-journal",
+                        "passes23.sqlite-wal",
+                        "passes23.sqlite-shm",
+                    }
+                    if (
+                        (not extracted_data and not empty_allowed)
+                        or len(extracted_data) > size_limit
+                    ):
+                        raise RuntimeError(
+                            f"extracted {leaf} is empty or too large"
+                        )
+
+                finally:
+                    if (
+                        cleanup_attempted
+                        and relocation_attempted
+                        and extracted_data is not None
+                    ):
+                        try:
+                            finish = native(
+                                "finish-extract",
+                                udid,
+                                source,
+                                link_destination,
+                                recovered,
+                                os.fspath(snapshot_root),
+                            )
+                            staging_cleanup_complete = operation_ok(finish)
+                            if staging_cleanup_complete:
+                                recovery_complete = write_file(
+                                    udid,
+                                    target,
+                                    leaf,
+                                    extracted_data,
+                                    retries=1,
+                                )
+                            recovery_detail = (
+                                "rewrite completed"
+                                if recovery_complete
+                                else "cleanup or rewrite failed"
+                            )
+                        except Exception as error:
+                            recovery_detail = (
+                                f"{type(error).__name__}: {error}"
+                            )
+                    elif (
+                        cleanup_attempted
+                        and relocation_attempted
+                        and target_missing
+                    ):
+                        try:
+                            finish = native(
+                                "finish-extract",
+                                udid,
+                                source,
+                                link_destination,
+                                recovered,
+                                os.fspath(snapshot_root),
+                            )
+                            staging_cleanup_complete = operation_ok(finish)
+                            recovery_complete = bool(
+                                finish.get("operation", {}).get(
+                                    "recoveredAbsent"
+                                )
+                            )
+                        except Exception:
+                            staging_cleanup_complete = False
+                            recovery_complete = False
+                    if relocation_attempted and not recovery_complete:
+                        raise ExtractionRestoreError(
+                            f"failed to restore original {leaf}: "
+                            f"{recovery_detail}"
+                        )
+                    if cleanup_attempted and not staging_cleanup_complete:
+                        raise ExtractionRestoreError(
+                            "failed to restore extraction staging state"
+                        )
+                return extracted_data
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            last_error = error
+            if (
+                not isinstance(
+                    error,
+                    (ExtractionRestoreError, FileNotFoundError),
+                )
+                and attempt < retries
+            ):
+                time.sleep(0.3 * attempt)
+                continue
+            break
+    if raise_errors and last_error is not None:
+        if isinstance(last_error, FileNotFoundError):
+            raise last_error
+        raise RuntimeError(f"{leaf}: {last_error}") from last_error
+    return None
+
+
+def normalize_wallet_db_color(value: str) -> str:
+    """Return Wallet's canonical rgba(r, g, b, 1.00) database format."""
+    match = re.fullmatch(
+        r"#?([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})",
+        value.strip(),
+    )
+    if match:
+        channels = tuple(int(part, 16) for part in match.groups())
+        return f"rgba({channels[0]}, {channels[1]}, {channels[2]}, 1.00)"
+
+    match = re.fullmatch(
+        r"rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)",
+        value.strip(),
+        re.IGNORECASE,
+    )
+    if match:
+        channels = tuple(int(part) for part in match.groups())
+        if all(channel <= 255 for channel in channels):
+            return f"rgba({channels[0]}, {channels[1]}, {channels[2]}, 1.00)"
+    raise ValueError("color must be #RRGGBB or rgb(r, g, b)")
+
+
+def normalize_primary_account_suffix(value: object) -> str | None:
+    """Validate an explicitly requested Wallet card-number suffix."""
+    if value == "NULL":
+        return None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9]{4}", value) is None:
+        raise ValueError(
+            "primary account suffix must be exactly four ASCII digits or NULL"
+        )
+    return value
+
+
+def _inspect_wallet_db_path(database: Path, card_hash: str) -> dict:
+    uri = f"{database.as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        connection.execute("PRAGMA query_only = ON")
+        quick_check = [
+            str(row[0]) for row in connection.execute("PRAGMA quick_check")
+        ]
+        journal_row = connection.execute("PRAGMA journal_mode").fetchone()
+        journal_mode = str(journal_row[0]).lower() if journal_row else ""
+        columns = [
+            str(row[1]) for row in connection.execute("PRAGMA table_info(pass)")
+        ]
+        required = {
+            "unique_id",
+            "foreground_color",
+            "label_color",
+            "primary_account_suffix",
+        }
+        missing = sorted(required.difference(columns))
+        if missing:
+            raise ValueError(
+                "wallet database pass table is missing required columns: "
+                + ", ".join(missing)
+            )
+
+        rows = connection.execute(
+            """
+            SELECT foreground_color, label_color, primary_account_suffix
+            FROM pass
+            WHERE unique_id = ?
+            """,
+            (card_hash,),
+        ).fetchmany(2)
+        row_count = len(rows)
+        if row_count != 1:
+            qualifier = "at least " if row_count == 2 else ""
+            raise ValueError(
+                "wallet database card match count must be exactly one "
+                f"(found {qualifier}{row_count})"
+            )
+
+    return {
+        "journalMode": journal_mode,
+        "quickCheck": quick_check,
+        "columns": columns,
+        "rowCount": row_count,
+        "foregroundColor": rows[0][0],
+        "labelColor": rows[0][1],
+        "primaryAccountSuffix": rows[0][2],
+    }
+
+
+def inspect_wallet_db_bytes(database_bytes: bytes, card_hash: str) -> dict:
+    """Validate and inspect a local Wallet database byte string."""
+    validate_card_hash(card_hash)
+    if not database_bytes or len(database_bytes) > EXTRACT_LIMITS[WALLET_DB_LEAF]:
+        raise ValueError("wallet database is empty or too large")
+    with tempfile.TemporaryDirectory(prefix="aircard-wallet-db-local-") as temporary:
+        database = Path(temporary) / WALLET_DB_LEAF
+        database.write_bytes(database_bytes)
+        return _inspect_wallet_db_path(database, card_hash)
+
+
+def patch_wallet_db(
+    original: bytes,
+    card_hash: str,
+    foreground_color: str | None = None,
+    label_color: str | None = None,
+    primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED,
+) -> dict:
+    """Patch requested style columns in a local delete-journal Wallet DB."""
+    requested = {
+        "foreground_color": foreground_color,
+        "label_color": label_color,
+    }
+    updates: dict[str, str | None] = {
+        column: normalize_wallet_db_color(value)
+        for column, value in requested.items()
+        if value is not None
+    }
+    if primary_account_suffix is not WALLET_DB_UNCHANGED:
+        updates["primary_account_suffix"] = normalize_primary_account_suffix(
+            primary_account_suffix
+        )
+    if not updates:
+        raise ValueError("at least one Wallet database change is required")
+
+    validate_card_hash(card_hash)
+    if not original or len(original) > EXTRACT_LIMITS[WALLET_DB_LEAF]:
+        raise ValueError("wallet database is empty or too large")
+
+    with tempfile.TemporaryDirectory(prefix="aircard-wallet-db-patch-") as temporary:
+        database = Path(temporary) / WALLET_DB_LEAF
+        database.write_bytes(original)
+        before = _inspect_wallet_db_path(database, card_hash)
+        if before["journalMode"] != "delete":
+            raise ValueError("wallet database journal_mode must be delete")
+        if before["quickCheck"] != ["ok"]:
+            raise ValueError("wallet database quick_check failed before update")
+
+        with closing(sqlite3.connect(database, isolation_level=None)) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                assignments = ", ".join(
+                    f"{column} = ?" for column in updates
+                )
+                parameters = [*updates.values(), card_hash]
+                connection.execute(
+                    f"UPDATE pass SET {assignments} WHERE unique_id = ?",
+                    parameters,
+                )
+                changed = connection.execute("SELECT changes()").fetchone()
+                if changed is None or int(changed[0]) != 1:
+                    raise ValueError(
+                        "wallet database update must change exactly one row"
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+            quick_check = [
+                str(row[0]) for row in connection.execute("PRAGMA quick_check")
+            ]
+            if quick_check != ["ok"]:
+                raise ValueError("wallet database quick_check failed after update")
+            row = connection.execute(
+                """
+                SELECT foreground_color, label_color, primary_account_suffix
+                FROM pass
+                WHERE unique_id = ?
+                """,
+                (card_hash,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("wallet database card disappeared after update")
+
+        applied = {
+            "foreground_color": row[0],
+            "label_color": row[1],
+            "primary_account_suffix": row[2],
+        }
+        mismatches = [
+            column
+            for column, expected in updates.items()
+            if applied[column] != expected
+        ]
+        if mismatches:
+            raise ValueError(
+                "wallet database values did not persist: "
+                + ", ".join(mismatches)
+            )
+
+        return {
+            "originalBytes": original,
+            "patchedBytes": database.read_bytes(),
+            "originalColors": {
+                "foreground_color": before["foregroundColor"],
+                "label_color": before["labelColor"],
+                "primary_account_suffix": before["primaryAccountSuffix"],
+            },
+            "appliedColors": applied,
+        }
+
+
+def _extract_optional_wallet_db_sidecar(
+    udid: str,
+    leaf: str,
+    output: Path,
+    phase: str,
+) -> bytes | None:
+    try:
+        return extract_file(
+            udid,
+            WALLET_DB_TARGET,
+            leaf,
+            os.fspath(output),
+            retries=1,
+            raise_errors=True,
+        )
+    except FileNotFoundError:
+        return None
+    except Exception as error:
+        raise RuntimeError(
+            f"{phase}-{leaf}: {type(error).__name__}: {error}"
+        ) from error
+
+
+def _require_wallet_db_sidecars_absent(
+    udid: str,
+    work: Path,
+    phase: str,
+) -> None:
+    for leaf in WALLET_DB_SIDECARS:
+        sidecar = _extract_optional_wallet_db_sidecar(
+            udid,
+            leaf,
+            work / leaf,
+            phase,
+        )
+        if sidecar is not None:
+            raise RuntimeError(
+                f"{phase}-{leaf}: wallet database sidecar exists; "
+                "refusing to write"
+            )
+
+
+def _extract_wallet_db_main_without_sidecars(
+    udid: str,
+    phase: str = "wallet-db",
+) -> bytes:
+    """Extract the main DB and fail unless every journal sidecar is absent."""
+    with tempfile.TemporaryDirectory(
+        prefix="aircard-wallet-db-device-"
+    ) as temporary:
+        work = Path(temporary)
+        try:
+            main = extract_file(
+                udid,
+                WALLET_DB_TARGET,
+                WALLET_DB_LEAF,
+                os.fspath(work / WALLET_DB_LEAF),
+                retries=1,
+                raise_errors=True,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"{phase}-main: {type(error).__name__}: {error}"
+            ) from error
+        if main is None:
+            raise RuntimeError(f"{phase}-main: wallet database is unavailable")
+        _require_wallet_db_sidecars_absent(udid, work, f"{phase}-after")
+        return main
+
+
+def prepare_wallet_db_patch(
+    udid: str,
+    card_hash: str,
+    foreground_color: str | None = None,
+    label_color: str | None = None,
+    primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED,
+) -> dict:
+    """Extract, gate, and locally prepare a Wallet DB style patch."""
+    if primary_account_suffix is not WALLET_DB_UNCHANGED:
+        normalize_primary_account_suffix(primary_account_suffix)
+    original = _extract_wallet_db_main_without_sidecars(udid, "prepare")
+    try:
+        patch = patch_wallet_db(
+            original,
+            card_hash,
+            foreground_color,
+            label_color,
+            primary_account_suffix,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"prepare-local-patch: {type(error).__name__}: {error}"
+        ) from error
+    patch["cardHash"] = card_hash
+    return patch
+
+
+def _write_wallet_db_and_verify(
+    udid: str,
+    replacement: bytes,
+    phase: str = "apply",
+) -> bytes:
+    if not write_file(
+        udid,
+        WALLET_DB_TARGET,
+        WALLET_DB_LEAF,
+        replacement,
+        retries=1,
+    ):
+        raise RuntimeError(f"{phase}-write: failed to write Wallet database")
+    return _extract_wallet_db_main_without_sidecars(
+        udid,
+        f"{phase}-readback",
+    )
+
+
+def rollback_wallet_db_patch(udid: str, prepared: dict) -> None:
+    """Restore only when the live bytes still equal the attempted patch."""
+    original = prepared["originalBytes"]
+    patched = prepared["patchedBytes"]
+    try:
+        current = _extract_wallet_db_main_without_sidecars(
+            udid,
+            "rollback-current",
+        )
+        if current == original:
+            readback = current
+        elif current == patched:
+            readback = _write_wallet_db_and_verify(
+                udid,
+                original,
+                "rollback-restore",
+            )
+        else:
+            raise RuntimeError(
+                "rollback-compare: live database changed after the attempted patch; "
+                "refusing stale rollback"
+            )
+        if readback != original:
+            raise RuntimeError(
+                "rollback-byte-compare: original bytes do not match device readback"
+            )
+        inspected = inspect_wallet_db_bytes(readback, prepared["cardHash"])
+        if inspected["quickCheck"] != ["ok"]:
+            raise RuntimeError(
+                "rollback-quick-check: restored database quick_check failed"
+            )
+        if inspected["journalMode"] != "delete":
+            raise RuntimeError(
+                "rollback-journal-mode: restored database journal mode changed"
+            )
+    except Exception as error:
+        raise RuntimeError(
+            "FATAL: wallet database rollback could not be verified: "
+            f"{error}"
+        ) from error
+
+
+def apply_wallet_db_patch(udid: str, prepared: dict) -> dict:
+    """Apply a patch with exact prewrite/readback gates and guarded rollback."""
+    original = prepared["originalBytes"]
+    patched = prepared["patchedBytes"]
+    card_hash = prepared["cardHash"]
+
+    write_attempted = False
+    try:
+        prewrite = _extract_wallet_db_main_without_sidecars(
+            udid,
+            "apply-prewrite",
+        )
+        if prewrite != original:
+            raise WalletDBPrewriteChangedError(
+                "apply-prewrite-compare: wallet database changed after "
+                "preparation; refusing to write"
+            )
+        write_attempted = True
+        readback = _write_wallet_db_and_verify(udid, patched, "apply")
+        if readback != patched:
+            raise RuntimeError(
+                "apply-readback-compare: Wallet database readback bytes "
+                "do not match"
+            )
+        inspected = inspect_wallet_db_bytes(readback, card_hash)
+        if inspected["journalMode"] != "delete":
+            raise RuntimeError(
+                "apply-journal-mode: Wallet database journal mode changed"
+            )
+        expected = prepared["appliedColors"]
+        actual = {
+            "foreground_color": inspected["foregroundColor"],
+            "label_color": inspected["labelColor"],
+            "primary_account_suffix": inspected["primaryAccountSuffix"],
+        }
+        mismatches = [
+            column
+            for column, value in expected.items()
+            if actual[column] != value
+        ]
+        if mismatches:
+            raise RuntimeError(
+                "apply-value-check: Wallet database values did not persist: "
+                + ", ".join(mismatches)
+            )
+        return inspected
+    except Exception as error:
+        if (
+            isinstance(error, WalletDBPrewriteChangedError)
+            or not write_attempted
+        ):
+            raise
+        try:
+            rollback_wallet_db_patch(udid, prepared)
+        except RuntimeError as rollback_error:
+            raise RuntimeError(f"{error}; {rollback_error}") from error
+        raise RuntimeError(
+            f"{error}; wallet database rollback verified"
+        ) from error
+
+
+def inspect_wallet_db(udid: str, card_hash: str) -> dict:
+    """Extract and inspect the Wallet pass database without modifying it."""
+    validate_card_hash(card_hash)
+    database = _extract_wallet_db_main_without_sidecars(udid, "inspect")
+    inspected = inspect_wallet_db_bytes(database, card_hash)
+    return {
+        "fileSizes": {
+            WALLET_DB_LEAF: len(database),
+            "passes23.sqlite-journal": None,
+            "passes23.sqlite-wal": None,
+            "passes23.sqlite-shm": None,
+        },
+        "sidecars": {"journal": False, "wal": False, "shm": False},
+        **inspected,
+    }
 
 
 def invalidate_cache(udid: str, card_hash: str) -> bool:

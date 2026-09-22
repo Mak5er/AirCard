@@ -945,6 +945,10 @@ static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *ar
     NSString *linkDestination = args[1];
     NSString *recovered = args[2];
     NSString *snapshotRoot = args[3];
+    NSDictionary *snapshot = LoadBooksSnapshot(snapshotRoot);
+    if (!GeneratedNamesMatch(source, linkDestination, recovered) || !snapshot)
+        return @{ @"ok": @NO, @"safeArguments": @NO };
+
     NSMutableArray<NSString *> *failures = NSMutableArray.array;
 
     if (!RemoveIfPresent(session->afc, linkDestination))
@@ -970,6 +974,153 @@ static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *ar
               @"recoveredAbsent": @(recoveredAbsent),
               @"booksPreimageRestored": @(booksRestored),
               @"booksRestore": booksRestore };
+}
+
+static long long ExtractLimitForLeaf(NSString *leaf);
+
+static NSDictionary *Extract(DeviceSession *session, NSArray<NSString *> *args) {
+    NSString *remotePath = args[0];
+    NSString *targetLeaf = args[1];
+    NSString *outputPath = args[2];
+
+    long long sizeLimit = ExtractLimitForLeaf(targetLeaf);
+    BOOL safeArguments =
+        GeneratedToken(remotePath, AIRLIFT_RECOVERED_PREFIX) != nil &&
+        sizeLimit > 0 && outputPath.length > 0;
+    if (!safeArguments)
+        return @{ @"ok": @NO, @"reason": @"unsafe extract arguments" };
+    if (!AFCExists(session->afc, remotePath))
+        return @{ @"ok": @NO, @"reason": @"file not found" };
+
+    long long size = AFCFileSize(session->afc, remotePath);
+    if (size < 0 || size > sizeLimit)
+        return @{ @"ok": @NO,
+                  @"reason": @"file too large or unreadable",
+                  @"size": @(size) };
+
+    NSData *content =
+        AFCReadFileWithLimit(session->afc, remotePath, sizeLimit);
+    if (!content)
+        return @{ @"ok": @NO,
+                  @"reason": @"AFC read failed",
+                  @"size": @(size) };
+
+    if (![content writeToFile:outputPath atomically:YES])
+        return @{ @"ok": @NO, @"reason": @"local write failed" };
+
+    return @{ @"ok": @YES,
+              @"remotePath": remotePath,
+              @"outputPath": outputPath,
+              @"size": @(content.length) };
+}
+
+static long long ExtractLimitForLeaf(NSString *leaf) {
+    NSDictionary<NSString *, NSNumber *> *allowedLeaves = @{
+        @"cardBackgroundCombined@3x.png": @(16LL * 1024 * 1024),
+        @"cardBackgroundCombined@2x.png": @(16LL * 1024 * 1024),
+        @"cardBackgroundCombined.pdf": @(16LL * 1024 * 1024),
+        @"passes23.sqlite": @(128LL * 1024 * 1024),
+        @"passes23.sqlite-journal": @(128LL * 1024 * 1024),
+        @"passes23.sqlite-wal": @(128LL * 1024 * 1024),
+        @"passes23.sqlite-shm": @(8LL * 1024 * 1024),
+    };
+    return allowedLeaves[leaf].longLongValue;
+}
+
+static NSDictionary *FinishExtract(DeviceSession *session,
+                                    NSArray<NSString *> *args) {
+    NSString *source = args[0];
+    NSString *linkDestination = args[1];
+    NSString *recovered = args[2];
+    NSString *snapshotRoot = args[3];
+    NSDictionary *snapshot = LoadBooksSnapshot(snapshotRoot);
+    if (!GeneratedNamesMatch(source, linkDestination, recovered) || !snapshot)
+        return @{ @"ok": @NO, @"safeArguments": @NO };
+
+    NSMutableArray<NSString *> *failures = NSMutableArray.array;
+    if (!RemoveIfPresent(session->afc, linkDestination))
+        [failures addObject:@"relocated link"];
+    if (!RemoveIfPresent(session->afc, recovered))
+        [failures addObject:@"recovered file"];
+    if (!RemoveGeneratedTree(session->afc, source, 0))
+        [failures addObject:@"StreamingZip tree"];
+    sleep(2);
+    NSDictionary *booksRestore = RestoreBooksState(session->afc, snapshotRoot);
+    BOOL booksRestored = [booksRestore[@"ok"] boolValue];
+    if (!booksRestored) [failures addObject:@"Books preimage"];
+
+    BOOL sourceAbsent = !AFCExists(session->afc, source);
+    BOOL linkAbsent = !AFCExists(session->afc, linkDestination);
+    BOOL cleanupComplete =
+        failures.count == 0 && sourceAbsent && linkAbsent && booksRestored;
+    return @{ @"ok": @(cleanupComplete),
+              @"safeArguments": @YES,
+              @"cleanupAuthorized": @YES,
+              @"cleanupComplete": @(cleanupComplete),
+              @"failures": failures,
+              @"sourceAbsent": @(sourceAbsent),
+              @"linkAbsent": @(linkAbsent),
+              @"recoveredAbsent": @YES,
+              @"booksPreimageRestored": @(booksRestored),
+              @"booksRestore": booksRestore };
+}
+
+static NSDictionary *ListWalletDBRecoveryCandidates(AFCConnectionRef afc) {
+    AFCDirectoryRef directory = NULL;
+    NSString *root = @"";
+    int openStatus = AFCDirectoryOpen(afc, "", &directory);
+    if (openStatus != 0 || !directory) {
+        root = @".";
+        directory = NULL;
+        openStatus = AFCDirectoryOpen(afc, ".", &directory);
+    }
+    if (openStatus != 0 || !directory) {
+        return @{ @"ok": @NO,
+                  @"reason": @"media root unavailable",
+                  @"openStatus": @(openStatus) };
+    }
+
+    NSMutableArray<NSDictionary *> *generatedEntries =
+        NSMutableArray.array;
+    NSMutableArray<NSDictionary *> *candidates = NSMutableArray.array;
+    BOOL readOK = YES;
+    for (NSUInteger index = 0; index < 8192; index++) {
+        char *raw = NULL;
+        int status = AFCDirectoryRead(afc, directory, &raw);
+        if (status != 0) {
+            readOK = NO;
+            break;
+        }
+        if (!raw) break;
+        NSString *name = [NSString stringWithUTF8String:raw];
+        BOOL isSource =
+            GeneratedToken(name, AIRLIFT_SOURCE_PREFIX) != nil;
+        BOOL isLink =
+            GeneratedToken(name, AIRLIFT_LINK_PREFIX) != nil;
+        BOOL isRecovered =
+            GeneratedToken(name, AIRLIFT_RECOVERED_PREFIX) != nil;
+        if (!isSource && !isLink && !isRecovered) continue;
+        NSString *path = root.length
+            ? [root stringByAppendingPathComponent:name] : name;
+        NSString *kind = AFCFileKind(afc, path) ?: @"";
+        long long size = AFCFileSize(afc, path);
+        NSDictionary *entry = @{
+            @"name": name,
+            @"size": @(size),
+            @"kind": kind,
+        };
+        [generatedEntries addObject:entry];
+        if (isRecovered && [kind isEqual:@"S_IFREG"] && size > 0 &&
+            size <= 128LL * 1024 * 1024)
+            [candidates addObject:entry];
+    }
+    BOOL closeOK = AFCDirectoryClose(afc, directory) == 0;
+    BOOL ok = readOK && closeOK;
+    return @{ @"ok": @(ok),
+              @"readComplete": @(readOK),
+              @"closeSucceeded": @(closeOK),
+              @"generatedEntries": generatedEntries,
+              @"candidates": candidates };
 }
 
 int main(int argc, const char *argv[]) {
@@ -1016,6 +1167,9 @@ int main(int argc, const char *argv[]) {
                         @([presentPaths containsObject:@"Books/Sync/Books.plist"]),
                     @"booksSyncPlistPresent":
                         @(AFCExists(session.afc, @"Books/Sync/Books.plist")) };
+            } else if ([command isEqual:@"list-wallet-db-recovery"] &&
+                       argc == 3) {
+                operation = ListWalletDBRecoveryCandidates(session.afc);
             } else if ([command isEqual:@"snapshot-books"] && argc == 4) {
                 operation = SnapshotBooksState(
                     session.afc, [NSString stringWithUTF8String:argv[3]]);
@@ -1044,6 +1198,19 @@ int main(int argc, const char *argv[]) {
                 ]);
             } else if ([command isEqual:@"finish-write"] && argc == 7) {
                 operation = FinishWrite(&session, @[
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                    [NSString stringWithUTF8String:argv[6]],
+                ]);
+            } else if ([command isEqual:@"extract"] && argc == 6) {
+                operation = Extract(&session, @[
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                ]);
+            } else if ([command isEqual:@"finish-extract"] && argc == 7) {
+                operation = FinishExtract(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
                     [NSString stringWithUTF8String:argv[4]],
                     [NSString stringWithUTF8String:argv[5]],

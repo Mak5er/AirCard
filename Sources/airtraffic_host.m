@@ -66,7 +66,7 @@ static BOOL ManifestContains(NSDictionary *manifest, NSString *identifier) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc < 6 || argc % 2 != 0) {
+        if (argc < 4 || argc % 2 != 0) {
             PrintJSON(@{ @"ok": @NO,
                          @"error": @"usage: airtraffic_host udid id path [id path ...]" });
             return 64;
@@ -97,7 +97,7 @@ int main(int argc, const char *argv[]) {
         }
 
         signal(SIGALRM, TimeoutHandler);
-        alarm(300);
+        alarm(110);
         ATHostConnectionRef connection =
             ATHostConnectionCreate((__bridge CFStringRef)deviceIdentifier);
         if (!connection) {

@@ -9,8 +9,10 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -41,13 +43,21 @@ for lp in lib_paths:
         os.environ["DYLD_LIBRARY_PATH"] = f"{lp}:{cur_dyld}" if cur_dyld else lp
 
 from apply_card_skin import (
+    apply_wallet_db_patch,
+    extract_file,
+    inspect_wallet_db,
     native,
+    normalize_primary_account_suffix,
     operation_ok,
+    prepare_wallet_db_patch,
+    rollback_wallet_db_patch,
+    validate_card_hash,
     write_file,
     write_files_batch,
     build_archive_multi,
     ROOT,
     DEVICE_HELPER,
+    WALLET_DB_UNCHANGED,
 )
 from card_assets import CACHE_FILES, build_card_assets
 from aircard import (
@@ -124,34 +134,326 @@ def cmd_prepare_image(src: str, dst: str):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
-def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
-    img_path = Path(image_path)
-    if not img_path.is_file():
+CARD_ARTWORK_ASSETS = (
+    ("cardBackgroundCombined@3x.png", "image/png"),
+    ("cardBackgroundCombined@2x.png", "image/png"),
+    ("cardBackgroundCombined.pdf", "application/pdf"),
+)
+
+
+def emit_db_diagnostic(
+    operation_id: str,
+    phase: str,
+    status: str,
+    started_at: float,
+    error: Exception | None = None,
+) -> None:
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+    root_error = error
+    while root_error is not None and root_error.__cause__ is not None:
+        root_error = root_error.__cause__
+    if error is None:
+        message = (
+            f"DB [{operation_id}] {phase} {status} "
+            f"({elapsed_ms} ms)"
+        )
+    else:
+        message = (
+            f"DB [{operation_id}] {phase} {status} "
+            f"after {elapsed_ms} ms: {type(root_error).__name__}: {error}"
+        )
+    payload = {
+        "type": "diagnostic",
+        "operationId": operation_id,
+        "phase": phase,
+        "status": status,
+        "elapsedMs": elapsed_ms,
+        "message": message,
+    }
+    if error is not None:
+        payload["errorType"] = type(root_error).__name__
+    print(json.dumps(payload))
+    sys.stdout.flush()
+
+
+def cmd_backup_card(
+    udid: str,
+    card_hash: str,
+    destination_path: str,
+) -> bool:
+    """Back up current artwork and database style after explicit user action."""
+    try:
+        validate_card_hash(card_hash)
+    except ValueError as error:
+        print(json.dumps({"ok": False, "error": str(error)}))
+        return False
+
+    destination = Path(destination_path).expanduser()
+    parent = destination.parent
+    if not parent.is_dir():
+        print(json.dumps({
+            "ok": False,
+            "error": "Backup destination parent does not exist",
+        }))
+        return False
+    if destination.exists() or destination.is_symlink():
+        try:
+            is_regular = stat.S_ISREG(destination.lstat().st_mode)
+        except OSError:
+            is_regular = False
+        if not is_regular:
+            print(json.dumps({
+                "ok": False,
+                "error": "Backup destination is not a regular file",
+            }))
+            return False
+
+    target = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
+    temporary_path: Path | None = None
+    try:
+        artwork = None
+        image_asset = None
+        image_mime = None
+        with tempfile.TemporaryDirectory(prefix="aircard-backup-read-") as temporary:
+            output_path = os.fspath(Path(temporary) / "card-artwork")
+            for asset, mime_type in CARD_ARTWORK_ASSETS:
+                artwork = extract_file(
+                    udid, target, asset, output_path, retries=1
+                )
+                if artwork is None:
+                    continue
+                image_asset = asset
+                image_mime = mime_type
+                break
+        if artwork is None or image_asset is None or image_mime is None:
+            raise RuntimeError("Card artwork is unavailable")
+
+        database = inspect_wallet_db(udid, card_hash)
+        wallet_style = {
+            "formatVersion": 2,
+            "source": "passes23.sqlite",
+            "foregroundColor": database["foregroundColor"],
+            "labelColor": database["labelColor"],
+            "primaryAccountSuffix": database["primaryAccountSuffix"],
+            "imageAsset": image_asset,
+        }
+        image_data_uri = (
+            f"data:{image_mime};base64,"
+            f"{base64.b64encode(artwork).decode('ascii')}"
+        )
+
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=parent,
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+        with zipfile.ZipFile(
+            temporary_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as archive:
+            archive.writestr(image_asset, artwork)
+            archive.writestr(
+                "wallet-style.json",
+                json.dumps(
+                    wallet_style,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ).encode("utf-8"),
+            )
+        os.replace(temporary_path, destination)
+        temporary_path = None
+
+        response = {
+            "ok": True,
+            "fileName": destination.name,
+            "imageDataURI": image_data_uri,
+            "imageAsset": image_asset,
+            "foregroundColor": wallet_style["foregroundColor"],
+            "labelColor": wallet_style["labelColor"],
+            "primaryAccountSuffix": wallet_style["primaryAccountSuffix"],
+        }
+        print(json.dumps(response))
+        return True
+    except Exception as error:
+        print(json.dumps({"ok": False, "error": str(error)}))
+        return False
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def cmd_inspect_wallet_db(udid: str, card_hash: str) -> bool:
+    try:
+        result = inspect_wallet_db(udid, card_hash)
+        print(json.dumps({"ok": True, **result}))
+        return True
+    except Exception as error:
+        print(json.dumps({"ok": False, "error": str(error)}))
+        return False
+
+
+def cmd_flash(
+    udid: str,
+    card_hash: str,
+    image_path: str,
+    foreground_color: str | None = None,
+    label_color: str | None = None,
+    primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED,
+) -> bool:
+    try:
+        validate_card_hash(card_hash)
+        if primary_account_suffix is not WALLET_DB_UNCHANGED:
+            normalize_primary_account_suffix(primary_account_suffix)
+    except ValueError as error:
+        print(json.dumps({"ok": False, "error": str(error)}))
+        return False
+    card_log_id = "redacted"
+
+    img_path = Path(image_path) if image_path and image_path != "-" else None
+    if img_path is not None and not img_path.is_file():
         print(json.dumps({"ok": False, "error": "Image file not found"}))
         return False
 
-    try:
-        asset_payloads = build_card_assets(img_path.read_bytes())
-    except (OSError, subprocess.SubprocessError):
-        print(json.dumps({
-            "type": "error",
-            "card": card_hash,
-            "message": "Failed to prepare card artwork"
-        }))
-        sys.stdout.flush()
-        return False
+    if img_path is None:
+        asset_payloads = []
+    else:
+        try:
+            asset_payloads = build_card_assets(img_path.read_bytes())
+        except (OSError, subprocess.SubprocessError):
+            print(json.dumps({
+                "type": "error",
+                "card": card_log_id,
+                "message": "Failed to prepare card artwork"
+            }))
+            sys.stdout.flush()
+            return False
 
     pkpass_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
     
-    total_steps = len(asset_payloads) + (len(CACHE_FILES) * 2) + 1
+    database_requested = (
+        foreground_color is not None
+        or label_color is not None
+        or primary_account_suffix is not WALLET_DB_UNCHANGED
+    )
+    cache_steps = len(CACHE_FILES) * 2 if asset_payloads else 0
+    total_steps = (
+        len(asset_payloads)
+        + cache_steps
+        + (2 if database_requested else 0)
+        + 1
+    )
     step = 0
     all_ok = True
+    failures: list[str] = []
+
+    original_colors: dict[str, str] = {}
+    applied_colors: dict[str, str] = {}
+    original_primary_account_suffix: str | None = None
+    applied_primary_account_suffix: str | None = None
+    prepared_database: dict | None = None
+    operation_id: str | None = None
+    database_started_at: float | None = None
+    if database_requested:
+        operation_id = os.urandom(4).hex()
+        database_started_at = time.monotonic()
+        current_phase = "prepare"
+        phase_started_at = time.monotonic()
+        emit_db_diagnostic(
+            operation_id,
+            "prepare",
+            "started",
+            phase_started_at,
+        )
+        step += 1
+        print(json.dumps({
+            "type": "progress",
+            "card": card_log_id,
+            "step": step,
+            "total": total_steps,
+            "message": "Preparing Wallet database transaction..."
+        }))
+        sys.stdout.flush()
+        try:
+            prepared_database = prepare_wallet_db_patch(
+                udid,
+                card_hash,
+                foreground_color,
+                label_color,
+                primary_account_suffix,
+            )
+            original_colors = {
+                "foregroundColor": prepared_database["originalColors"][
+                    "foreground_color"
+                ],
+                "labelColor": prepared_database["originalColors"]["label_color"],
+            }
+            applied_colors = {
+                "foregroundColor": prepared_database["appliedColors"][
+                    "foreground_color"
+                ],
+                "labelColor": prepared_database["appliedColors"]["label_color"],
+            }
+            original_primary_account_suffix = prepared_database[
+                "originalColors"
+            ]["primary_account_suffix"]
+            applied_primary_account_suffix = prepared_database[
+                "appliedColors"
+            ]["primary_account_suffix"]
+            emit_db_diagnostic(
+                operation_id,
+                "prepare",
+                "completed",
+                phase_started_at,
+            )
+
+            current_phase = "apply"
+            phase_started_at = time.monotonic()
+            emit_db_diagnostic(
+                operation_id,
+                "apply",
+                "started",
+                phase_started_at,
+            )
+            step += 1
+            print(json.dumps({
+                "type": "progress",
+                "card": card_log_id,
+                "step": step,
+                "total": total_steps,
+                "message": "Updating Wallet database..."
+            }))
+            sys.stdout.flush()
+            apply_wallet_db_patch(udid, prepared_database)
+            emit_db_diagnostic(
+                operation_id,
+                "apply",
+                "completed",
+                phase_started_at,
+            )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            all_ok = False
+            failure = str(error)
+            failures.append(failure)
+            emit_db_diagnostic(
+                operation_id,
+                current_phase,
+                "failed",
+                phase_started_at,
+                error,
+            )
+
+    if not all_ok:
+        return False
 
     for asset, payload in asset_payloads:
         step += 1
         print(json.dumps({
             "type": "progress",
-            "card": card_hash,
+            "card": card_log_id,
             "step": step,
             "total": total_steps,
             "asset": asset,
@@ -164,58 +466,109 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
             ok = False
         if not ok:
             all_ok = False
+            failures.append(f"Failed to write {asset}")
             print(json.dumps({
                 "type": "error",
-                "card": card_hash,
+                "card": card_log_id,
                 "asset": asset,
                 "message": f"Failed to write {asset}"
             }))
             sys.stdout.flush()
 
-    # Clear cache
-    for ext in [".cache", ".pkcache"]:
-        cache_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}{ext}"
-        for leaf in CACHE_FILES:
-            step += 1
-            print(json.dumps({
-                "type": "progress",
-                "card": card_hash,
-                "step": step,
-                "total": total_steps,
-                "message": f"Invalidating cache ({leaf} in {ext})..."
-            }))
-            sys.stdout.flush()
-            try:
-                ok = write_file(udid, cache_dir, leaf, b"corrupted")
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                ok = False
-            if not ok:
-                all_ok = False
+    if asset_payloads:
+        for ext in [".cache", ".pkcache"]:
+            cache_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}{ext}"
+            for leaf in CACHE_FILES:
+                step += 1
                 print(json.dumps({
-                    "type": "error",
-                    "card": card_hash,
-                    "message": f"Failed to invalidate cache ({leaf} in {ext})"
+                    "type": "progress",
+                    "card": card_log_id,
+                    "step": step,
+                    "total": total_steps,
+                    "message": f"Invalidating cache ({leaf} in {ext})..."
                 }))
                 sys.stdout.flush()
+                try:
+                    ok = write_file(udid, cache_dir, leaf, b"corrupted")
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    ok = False
+                if not ok:
+                    all_ok = False
+                    failures.append(
+                        f"Failed to invalidate cache ({leaf} in {ext})"
+                    )
+                    print(json.dumps({
+                        "type": "error",
+                        "card": card_log_id,
+                        "message": (
+                            f"Failed to invalidate cache ({leaf} in {ext})"
+                        ),
+                    }))
+                    sys.stdout.flush()
+
+    if not all_ok and database_requested:
+        rollback_started_at = time.monotonic()
+        emit_db_diagnostic(
+            operation_id,
+            "rollback",
+            "started",
+            rollback_started_at,
+        )
+        try:
+            if prepared_database is None:
+                raise RuntimeError("color rollback state is unavailable")
+            rollback_wallet_db_patch(udid, prepared_database)
+            failures.append("Wallet database rollback verified")
+            emit_db_diagnostic(
+                operation_id,
+                "rollback",
+                "completed",
+                rollback_started_at,
+            )
+        except RuntimeError as rollback_error:
+            failures.append(str(rollback_error))
+            emit_db_diagnostic(
+                operation_id,
+                "rollback",
+                "failed",
+                rollback_started_at,
+                rollback_error,
+            )
 
     step += 1
     if not all_ok:
         print(json.dumps({
             "type": "error",
-            "card": card_hash,
+            "card": card_log_id,
             "step": step,
             "total": total_steps,
-            "message": f"Failed to update {card_hash[:12]}..."
+            "message": "; ".join(failures),
         }))
         sys.stdout.flush()
         return False
 
+    if database_requested:
+        emit_db_diagnostic(
+            operation_id,
+            "transaction",
+            "completed",
+            database_started_at,
+        )
     print(json.dumps({
         "type": "success",
-        "card": card_hash,
+        "card": card_log_id,
         "step": step,
         "total": total_steps,
-        "message": f"Successfully updated {card_hash[:12]}..."
+        "message": (
+            "Successfully updated card. Reboot required: restart your iPhone "
+            "to apply Wallet database changes."
+            if database_requested
+            else "Successfully updated card."
+        ),
+        "originalColors": original_colors,
+        "appliedColors": applied_colors,
+        "originalPrimaryAccountSuffix": original_primary_account_suffix,
+        "appliedPrimaryAccountSuffix": applied_primary_account_suffix,
     }))
     sys.stdout.flush()
     return True
@@ -572,8 +925,39 @@ def main():
         cmd_save_cards(sys.argv[2])
     elif norm_cmd == "prepare-image" and len(sys.argv) > 3:
         cmd_prepare_image(sys.argv[2], sys.argv[3])
+    elif norm_cmd == "backup-card" and len(sys.argv) == 5:
+        if not cmd_backup_card(sys.argv[2], sys.argv[3], sys.argv[4]):
+            sys.exit(1)
+    elif norm_cmd == "inspect-wallet-db" and len(sys.argv) == 4:
+        if not cmd_inspect_wallet_db(sys.argv[2], sys.argv[3]):
+            sys.exit(1)
     elif norm_cmd == "flash" and len(sys.argv) > 4:
-        if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4]):
+        foreground_color = None
+        label_color = None
+        primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED
+        index = 5
+        while index < len(sys.argv):
+            if index + 1 >= len(sys.argv):
+                print(json.dumps({"error": f"Missing value for {sys.argv[index]}"}))
+                sys.exit(1)
+            if sys.argv[index] == "--foreground-color":
+                foreground_color = sys.argv[index + 1]
+            elif sys.argv[index] == "--label-color":
+                label_color = sys.argv[index + 1]
+            elif sys.argv[index] == "--primary-account-suffix":
+                primary_account_suffix = sys.argv[index + 1]
+            else:
+                print(json.dumps({"error": f"Unknown flash option: {sys.argv[index]}"}))
+                sys.exit(1)
+            index += 2
+        if not cmd_flash(
+            sys.argv[2],
+            sys.argv[3],
+            sys.argv[4],
+            foreground_color,
+            label_color,
+            primary_account_suffix,
+        ):
             sys.exit(1)
     elif norm_cmd == "inspect-passthm" and len(sys.argv) > 2:
         cmd_inspect_passthm(sys.argv[2])
