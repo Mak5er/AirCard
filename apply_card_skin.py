@@ -650,67 +650,283 @@ def normalize_primary_account_suffix(value: object) -> str | None:
     return value
 
 
-def _inspect_wallet_db_path(database: Path, card_hash: str) -> dict:
-    uri = f"{database.as_uri()}?mode=ro"
-    with closing(sqlite3.connect(uri, uri=True)) as connection:
-        connection.execute("PRAGMA query_only = ON")
-        quick_check = [
-            str(row[0]) for row in connection.execute("PRAGMA quick_check")
-        ]
-        journal_row = connection.execute("PRAGMA journal_mode").fetchone()
-        journal_mode = str(journal_row[0]).lower() if journal_row else ""
-        columns = [
-            str(row[1]) for row in connection.execute("PRAGMA table_info(pass)")
-        ]
-        required = {
-            "unique_id",
-            "foreground_color",
-            "label_color",
-            "primary_account_suffix",
-        }
-        missing = sorted(required.difference(columns))
-        if missing:
-            raise ValueError(
-                "wallet database pass table is missing required columns: "
-                + ", ".join(missing)
-            )
-
-        rows = connection.execute(
-            """
-            SELECT foreground_color, label_color, primary_account_suffix
-            FROM pass
-            WHERE unique_id = ?
-            """,
-            (card_hash,),
-        ).fetchmany(2)
-        row_count = len(rows)
-        if row_count != 1:
-            qualifier = "at least " if row_count == 2 else ""
-            raise ValueError(
-                "wallet database card match count must be exactly one "
-                f"(found {qualifier}{row_count})"
-            )
-
+def _wallet_db_metadata(connection: sqlite3.Connection) -> dict:
+    quick_check = [
+        str(row[0]) for row in connection.execute("PRAGMA quick_check")
+    ]
+    journal_row = connection.execute("PRAGMA journal_mode").fetchone()
+    journal_mode = str(journal_row[0]).lower() if journal_row else ""
+    columns = [
+        str(row[1]) for row in connection.execute("PRAGMA table_info(pass)")
+    ]
+    required = {
+        "unique_id",
+        "foreground_color",
+        "label_color",
+        "primary_account_suffix",
+    }
+    missing = sorted(required.difference(columns))
+    if missing:
+        raise ValueError(
+            "wallet database pass table is missing required columns: "
+            + ", ".join(missing)
+        )
     return {
         "journalMode": journal_mode,
         "quickCheck": quick_check,
         "columns": columns,
-        "rowCount": row_count,
-        "foregroundColor": rows[0][0],
-        "labelColor": rows[0][1],
-        "primaryAccountSuffix": rows[0][2],
     }
 
 
-def inspect_wallet_db_bytes(database_bytes: bytes, card_hash: str) -> dict:
-    """Validate and inspect a local Wallet database byte string."""
-    validate_card_hash(card_hash)
+def _wallet_db_card_row(
+    connection: sqlite3.Connection,
+    card_hash: str,
+) -> tuple:
+    rows = connection.execute(
+        """
+        SELECT foreground_color, label_color, primary_account_suffix
+        FROM pass
+        WHERE unique_id = ?
+        """,
+        (card_hash,),
+    ).fetchmany(2)
+    row_count = len(rows)
+    if row_count != 1:
+        qualifier = "at least " if row_count == 2 else ""
+        raise ValueError(
+            "wallet database card match count must be exactly one "
+            f"(found {qualifier}{row_count})"
+        )
+    return rows[0]
+
+
+def _inspect_wallet_db_path(database: Path, card_hash: str) -> dict:
+    uri = f"{database.as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        connection.execute("PRAGMA query_only = ON")
+        metadata = _wallet_db_metadata(connection)
+        row = _wallet_db_card_row(connection, card_hash)
+
+    return {
+        **metadata,
+        "rowCount": 1,
+        "foregroundColor": row[0],
+        "labelColor": row[1],
+        "primaryAccountSuffix": row[2],
+    }
+
+
+def inspect_wallet_db_batch_bytes(
+    database_bytes: bytes,
+    card_hashes: list[str],
+) -> list[dict]:
+    """Inspect multiple card rows from one local database image."""
+    if not card_hashes:
+        raise ValueError("at least one Wallet database card is required")
+    for card_hash in card_hashes:
+        validate_card_hash(card_hash)
     if not database_bytes or len(database_bytes) > EXTRACT_LIMITS[WALLET_DB_LEAF]:
         raise ValueError("wallet database is empty or too large")
     with tempfile.TemporaryDirectory(prefix="aircard-wallet-db-local-") as temporary:
         database = Path(temporary) / WALLET_DB_LEAF
         database.write_bytes(database_bytes)
-        return _inspect_wallet_db_path(database, card_hash)
+        uri = f"{database.as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            metadata = _wallet_db_metadata(connection)
+            results = []
+            for card_hash in card_hashes:
+                row = _wallet_db_card_row(connection, card_hash)
+                results.append({
+                    **metadata,
+                    "rowCount": 1,
+                    "foregroundColor": row[0],
+                    "labelColor": row[1],
+                    "primaryAccountSuffix": row[2],
+                })
+            return results
+
+
+def inspect_wallet_db_bytes(database_bytes: bytes, card_hash: str) -> dict:
+    """Validate and inspect one card from a local Wallet database."""
+    return inspect_wallet_db_batch_bytes(database_bytes, [card_hash])[0]
+
+
+def _normalize_wallet_db_update(
+    card_hash: str,
+    foreground_color: str | None,
+    label_color: str | None,
+    primary_account_suffix: str | None | object,
+) -> dict:
+    validate_card_hash(card_hash)
+    updates: dict[str, str | None] = {
+        column: normalize_wallet_db_color(value)
+        for column, value in {
+            "foreground_color": foreground_color,
+            "label_color": label_color,
+        }.items()
+        if value is not None
+    }
+    if primary_account_suffix is not WALLET_DB_UNCHANGED:
+        updates["primary_account_suffix"] = normalize_primary_account_suffix(
+            primary_account_suffix
+        )
+    if not updates:
+        raise ValueError("at least one Wallet database change is required")
+    return updates
+
+
+def patch_wallet_db_batch(original: bytes, updates: list[dict]) -> dict:
+    """Patch all requested cards in one local SQLite transaction."""
+    if not updates:
+        raise ValueError("at least one Wallet database change is required")
+    if not original or len(original) > EXTRACT_LIMITS[WALLET_DB_LEAF]:
+        raise ValueError("wallet database is empty or too large")
+
+    normalized_updates: list[dict] = []
+    seen_hashes: set[str] = set()
+    seen_request_indices: set[int] = set()
+    allowed_keys = {
+        "cardHash",
+        "foregroundColor",
+        "labelColor",
+        "primaryAccountSuffix",
+        "requestIndex",
+    }
+    for update in updates:
+        if not isinstance(update, dict):
+            raise ValueError("Wallet database updates must be objects")
+        unknown_keys = set(update).difference(allowed_keys)
+        if unknown_keys:
+            raise ValueError(
+                "unknown Wallet database update fields: "
+                + ", ".join(sorted(unknown_keys))
+            )
+        card_hash = update.get("cardHash")
+        if not isinstance(card_hash, str):
+            raise ValueError("Wallet database update is missing cardHash")
+        if card_hash in seen_hashes:
+            raise ValueError("duplicate Wallet database card update")
+        seen_hashes.add(card_hash)
+        request_index = update.get("requestIndex")
+        if (
+            request_index is not None
+            and (
+                isinstance(request_index, bool)
+                or not isinstance(request_index, int)
+                or request_index < 0
+            )
+        ):
+            raise ValueError("Wallet database requestIndex must be non-negative")
+        if (
+            request_index is not None
+            and request_index in seen_request_indices
+        ):
+            raise ValueError("duplicate Wallet database requestIndex")
+        if request_index is not None:
+            seen_request_indices.add(request_index)
+        normalized_updates.append({
+            "cardHash": card_hash,
+            "requestIndex": request_index,
+            "updates": _normalize_wallet_db_update(
+                card_hash,
+                update.get("foregroundColor"),
+                update.get("labelColor"),
+                update.get("primaryAccountSuffix", WALLET_DB_UNCHANGED),
+            ),
+        })
+
+    with tempfile.TemporaryDirectory(
+        prefix="aircard-wallet-db-patch-"
+    ) as temporary:
+        database = Path(temporary) / WALLET_DB_LEAF
+        database.write_bytes(original)
+        cards: list[dict] = []
+        with closing(
+            sqlite3.connect(database, isolation_level=None)
+        ) as connection:
+            metadata = _wallet_db_metadata(connection)
+            if metadata["journalMode"] != "delete":
+                raise ValueError("wallet database journal_mode must be delete")
+            if metadata["quickCheck"] != ["ok"]:
+                raise ValueError(
+                    "wallet database quick_check failed before update"
+                )
+
+            for update in normalized_updates:
+                row = _wallet_db_card_row(connection, update["cardHash"])
+                cards.append({
+                    "cardHash": update["cardHash"],
+                    "requestIndex": update["requestIndex"],
+                    "originalColors": {
+                        "foreground_color": row[0],
+                        "label_color": row[1],
+                        "primary_account_suffix": row[2],
+                    },
+                    "updates": update["updates"],
+                })
+
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for card in cards:
+                    assignments = ", ".join(
+                        f"{column} = ?" for column in card["updates"]
+                    )
+                    parameters = [
+                        *card["updates"].values(),
+                        card["cardHash"],
+                    ]
+                    connection.execute(
+                        f"UPDATE pass SET {assignments} WHERE unique_id = ?",
+                        parameters,
+                    )
+                    changed = connection.execute(
+                        "SELECT changes()"
+                    ).fetchone()
+                    if changed is None or int(changed[0]) != 1:
+                        raise ValueError(
+                            "wallet database update must change exactly one row"
+                        )
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+            quick_check = [
+                str(row[0])
+                for row in connection.execute("PRAGMA quick_check")
+            ]
+            if quick_check != ["ok"]:
+                raise ValueError(
+                    "wallet database quick_check failed after update"
+                )
+            for card in cards:
+                row = _wallet_db_card_row(connection, card["cardHash"])
+                applied = {
+                    "foreground_color": row[0],
+                    "label_color": row[1],
+                    "primary_account_suffix": row[2],
+                }
+                mismatches = [
+                    column
+                    for column, expected in card["updates"].items()
+                    if applied[column] != expected
+                ]
+                if mismatches:
+                    raise ValueError(
+                        "wallet database values did not persist: "
+                        + ", ".join(mismatches)
+                    )
+                card["appliedColors"] = applied
+                del card["updates"]
+
+        return {
+            "originalBytes": original,
+            "patchedBytes": database.read_bytes(),
+            "cardHashes": [card["cardHash"] for card in cards],
+            "cards": cards,
+        }
 
 
 def patch_wallet_db(
@@ -720,100 +936,27 @@ def patch_wallet_db(
     label_color: str | None = None,
     primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED,
 ) -> dict:
-    """Patch requested style columns in a local delete-journal Wallet DB."""
-    requested = {
-        "foreground_color": foreground_color,
-        "label_color": label_color,
+    """Patch one card through the shared batch transaction."""
+    batch = patch_wallet_db_batch(
+        original,
+        [{
+            "cardHash": card_hash,
+            "foregroundColor": foreground_color,
+            "labelColor": label_color,
+            **(
+                {"primaryAccountSuffix": primary_account_suffix}
+                if primary_account_suffix is not WALLET_DB_UNCHANGED
+                else {}
+            ),
+        }],
+    )
+    card = batch["cards"][0]
+    return {
+        "originalBytes": batch["originalBytes"],
+        "patchedBytes": batch["patchedBytes"],
+        "originalColors": card["originalColors"],
+        "appliedColors": card["appliedColors"],
     }
-    updates: dict[str, str | None] = {
-        column: normalize_wallet_db_color(value)
-        for column, value in requested.items()
-        if value is not None
-    }
-    if primary_account_suffix is not WALLET_DB_UNCHANGED:
-        updates["primary_account_suffix"] = normalize_primary_account_suffix(
-            primary_account_suffix
-        )
-    if not updates:
-        raise ValueError("at least one Wallet database change is required")
-
-    validate_card_hash(card_hash)
-    if not original or len(original) > EXTRACT_LIMITS[WALLET_DB_LEAF]:
-        raise ValueError("wallet database is empty or too large")
-
-    with tempfile.TemporaryDirectory(prefix="aircard-wallet-db-patch-") as temporary:
-        database = Path(temporary) / WALLET_DB_LEAF
-        database.write_bytes(original)
-        before = _inspect_wallet_db_path(database, card_hash)
-        if before["journalMode"] != "delete":
-            raise ValueError("wallet database journal_mode must be delete")
-        if before["quickCheck"] != ["ok"]:
-            raise ValueError("wallet database quick_check failed before update")
-
-        with closing(sqlite3.connect(database, isolation_level=None)) as connection:
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                assignments = ", ".join(
-                    f"{column} = ?" for column in updates
-                )
-                parameters = [*updates.values(), card_hash]
-                connection.execute(
-                    f"UPDATE pass SET {assignments} WHERE unique_id = ?",
-                    parameters,
-                )
-                changed = connection.execute("SELECT changes()").fetchone()
-                if changed is None or int(changed[0]) != 1:
-                    raise ValueError(
-                        "wallet database update must change exactly one row"
-                    )
-                connection.execute("COMMIT")
-            except Exception:
-                if connection.in_transaction:
-                    connection.execute("ROLLBACK")
-                raise
-
-            quick_check = [
-                str(row[0]) for row in connection.execute("PRAGMA quick_check")
-            ]
-            if quick_check != ["ok"]:
-                raise ValueError("wallet database quick_check failed after update")
-            row = connection.execute(
-                """
-                SELECT foreground_color, label_color, primary_account_suffix
-                FROM pass
-                WHERE unique_id = ?
-                """,
-                (card_hash,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("wallet database card disappeared after update")
-
-        applied = {
-            "foreground_color": row[0],
-            "label_color": row[1],
-            "primary_account_suffix": row[2],
-        }
-        mismatches = [
-            column
-            for column, expected in updates.items()
-            if applied[column] != expected
-        ]
-        if mismatches:
-            raise ValueError(
-                "wallet database values did not persist: "
-                + ", ".join(mismatches)
-            )
-
-        return {
-            "originalBytes": original,
-            "patchedBytes": database.read_bytes(),
-            "originalColors": {
-                "foreground_color": before["foregroundColor"],
-                "label_color": before["labelColor"],
-                "primary_account_suffix": before["primaryAccountSuffix"],
-            },
-            "appliedColors": applied,
-        }
 
 
 def _extract_optional_wallet_db_sidecar(
@@ -913,6 +1056,17 @@ def prepare_wallet_db_patch(
     return patch
 
 
+def prepare_wallet_db_batch_patch(udid: str, updates: list[dict]) -> dict:
+    """Extract once and prepare one final DB image for all card updates."""
+    original = _extract_wallet_db_main_without_sidecars(udid, "prepare")
+    try:
+        return patch_wallet_db_batch(original, updates)
+    except Exception as error:
+        raise RuntimeError(
+            f"prepare-local-patch: {type(error).__name__}: {error}"
+        ) from error
+
+
 def _write_wallet_db_and_verify(
     udid: str,
     replacement: bytes,
@@ -958,15 +1112,22 @@ def rollback_wallet_db_patch(udid: str, prepared: dict) -> None:
             raise RuntimeError(
                 "rollback-byte-compare: original bytes do not match device readback"
             )
-        inspected = inspect_wallet_db_bytes(readback, prepared["cardHash"])
-        if inspected["quickCheck"] != ["ok"]:
-            raise RuntimeError(
-                "rollback-quick-check: restored database quick_check failed"
-            )
-        if inspected["journalMode"] != "delete":
-            raise RuntimeError(
-                "rollback-journal-mode: restored database journal mode changed"
-            )
+        card_hashes = prepared.get("cardHashes")
+        if card_hashes is None:
+            card_hashes = [prepared["cardHash"]]
+        inspected_cards = inspect_wallet_db_batch_bytes(
+            readback,
+            card_hashes,
+        )
+        for inspected in inspected_cards:
+            if inspected["quickCheck"] != ["ok"]:
+                raise RuntimeError(
+                    "rollback-quick-check: restored database quick_check failed"
+                )
+            if inspected["journalMode"] != "delete":
+                raise RuntimeError(
+                    "rollback-journal-mode: restored database journal mode changed"
+                )
     except Exception as error:
         raise RuntimeError(
             "FATAL: wallet database rollback could not be verified: "
@@ -974,11 +1135,16 @@ def rollback_wallet_db_patch(udid: str, prepared: dict) -> None:
         ) from error
 
 
-def apply_wallet_db_patch(udid: str, prepared: dict) -> dict:
-    """Apply a patch with exact prewrite/readback gates and guarded rollback."""
+def apply_wallet_db_batch_patch(udid: str, prepared: dict) -> list[dict]:
+    """Write one prepared DB image and verify every requested card update."""
     original = prepared["originalBytes"]
     patched = prepared["patchedBytes"]
-    card_hash = prepared["cardHash"]
+    cards = prepared.get("cards")
+    if cards is None:
+        cards = [{
+            "cardHash": prepared["cardHash"],
+            "appliedColors": prepared["appliedColors"],
+        }]
 
     write_attempted = False
     try:
@@ -998,28 +1164,34 @@ def apply_wallet_db_patch(udid: str, prepared: dict) -> dict:
                 "apply-readback-compare: Wallet database readback bytes "
                 "do not match"
             )
-        inspected = inspect_wallet_db_bytes(readback, card_hash)
-        if inspected["journalMode"] != "delete":
-            raise RuntimeError(
-                "apply-journal-mode: Wallet database journal mode changed"
-            )
-        expected = prepared["appliedColors"]
-        actual = {
-            "foreground_color": inspected["foregroundColor"],
-            "label_color": inspected["labelColor"],
-            "primary_account_suffix": inspected["primaryAccountSuffix"],
-        }
-        mismatches = [
-            column
-            for column, value in expected.items()
-            if actual[column] != value
-        ]
-        if mismatches:
-            raise RuntimeError(
-                "apply-value-check: Wallet database values did not persist: "
-                + ", ".join(mismatches)
-            )
-        return inspected
+        inspected_cards = inspect_wallet_db_batch_bytes(
+            readback,
+            [card["cardHash"] for card in cards],
+        )
+        for card, inspected in zip(cards, inspected_cards):
+            if inspected["journalMode"] != "delete":
+                raise RuntimeError(
+                    "apply-journal-mode: Wallet database journal mode changed"
+                )
+            expected = card["appliedColors"]
+            actual = {
+                "foreground_color": inspected["foregroundColor"],
+                "label_color": inspected["labelColor"],
+                "primary_account_suffix": inspected[
+                    "primaryAccountSuffix"
+                ],
+            }
+            mismatches = [
+                column
+                for column, value in expected.items()
+                if actual[column] != value
+            ]
+            if mismatches:
+                raise RuntimeError(
+                    "apply-value-check: Wallet database values did not persist: "
+                    + ", ".join(mismatches)
+                )
+        return inspected_cards
     except Exception as error:
         if (
             isinstance(error, WalletDBPrewriteChangedError)
@@ -1033,6 +1205,11 @@ def apply_wallet_db_patch(udid: str, prepared: dict) -> dict:
         raise RuntimeError(
             f"{error}; wallet database rollback verified"
         ) from error
+
+
+def apply_wallet_db_patch(udid: str, prepared: dict) -> dict:
+    """Apply one card patch with the shared batch write path."""
+    return apply_wallet_db_batch_patch(udid, prepared)[0]
 
 
 def inspect_wallet_db(udid: str, card_hash: str) -> dict:

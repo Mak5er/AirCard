@@ -43,12 +43,14 @@ for lp in lib_paths:
         os.environ["DYLD_LIBRARY_PATH"] = f"{lp}:{cur_dyld}" if cur_dyld else lp
 
 from apply_card_skin import (
+    apply_wallet_db_batch_patch,
     apply_wallet_db_patch,
     extract_file,
     inspect_wallet_db,
     native,
     normalize_primary_account_suffix,
     operation_ok,
+    prepare_wallet_db_batch_patch,
     prepare_wallet_db_patch,
     rollback_wallet_db_patch,
     validate_card_hash,
@@ -293,6 +295,116 @@ def cmd_inspect_wallet_db(udid: str, card_hash: str) -> bool:
         return True
     except Exception as error:
         print(json.dumps({"ok": False, "error": str(error)}))
+        return False
+
+
+def cmd_flash_wallet_db_batch(udid: str, updates_path: str) -> bool:
+    operation_id = os.urandom(4).hex()
+    phase = "prepare"
+    phase_started_at = time.monotonic()
+    transaction_started_at = phase_started_at
+    try:
+        raw = Path(updates_path).read_bytes()
+        if not raw or len(raw) > 1024 * 1024:
+            raise ValueError("Wallet database update file is empty or too large")
+        updates = json.loads(raw)
+        if not isinstance(updates, list) or not updates:
+            raise ValueError("Wallet database update file must contain a list")
+
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "started",
+            phase_started_at,
+        )
+        print(json.dumps({
+            "type": "progress",
+            "step": 1,
+            "total": 2,
+            "message": "Preparing Wallet database transaction...",
+        }))
+        sys.stdout.flush()
+        prepared = prepare_wallet_db_batch_patch(udid, updates)
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "completed",
+            phase_started_at,
+        )
+
+        phase = "apply"
+        phase_started_at = time.monotonic()
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "started",
+            phase_started_at,
+        )
+        print(json.dumps({
+            "type": "progress",
+            "step": 2,
+            "total": 2,
+            "message": "Updating Wallet database...",
+        }))
+        sys.stdout.flush()
+        apply_wallet_db_batch_patch(udid, prepared)
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "completed",
+            phase_started_at,
+        )
+        emit_db_diagnostic(
+            operation_id,
+            "transaction",
+            "completed",
+            transaction_started_at,
+        )
+
+        cards = [{
+            "requestIndex": card.get("requestIndex"),
+            "originalColors": {
+                "foregroundColor": card["originalColors"]["foreground_color"],
+                "labelColor": card["originalColors"]["label_color"],
+            },
+            "appliedColors": {
+                "foregroundColor": card["appliedColors"]["foreground_color"],
+                "labelColor": card["appliedColors"]["label_color"],
+            },
+            "originalPrimaryAccountSuffix": card["originalColors"][
+                "primary_account_suffix"
+            ],
+            "appliedPrimaryAccountSuffix": card["appliedColors"][
+                "primary_account_suffix"
+            ],
+        } for card in prepared["cards"]]
+        print(json.dumps({
+            "type": "success",
+            "step": 2,
+            "total": 2,
+            "message": (
+                f"Wallet database updated once for {len(cards)} card(s). "
+                "Restart your iPhone to apply the changes."
+            ),
+            "cards": cards,
+        }))
+        sys.stdout.flush()
+        return True
+    except (
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as error:
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "failed",
+            phase_started_at,
+            error,
+        )
         return False
 
 
@@ -930,6 +1042,9 @@ def main():
             sys.exit(1)
     elif norm_cmd == "inspect-wallet-db" and len(sys.argv) == 4:
         if not cmd_inspect_wallet_db(sys.argv[2], sys.argv[3]):
+            sys.exit(1)
+    elif norm_cmd == "flash-wallet-db-batch" and len(sys.argv) == 4:
+        if not cmd_flash_wallet_db_batch(sys.argv[2], sys.argv[3]):
             sys.exit(1)
     elif norm_cmd == "flash" and len(sys.argv) > 4:
         foreground_color = None

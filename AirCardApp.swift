@@ -115,7 +115,11 @@ struct CardItem: Identifiable, Hashable {
 
     var hasPendingChanges: Bool {
         customImageURL != nil ||
-            foregroundColorHex != nil ||
+            hasPendingDatabaseChanges
+    }
+
+    var hasPendingDatabaseChanges: Bool {
+        foregroundColorHex != nil ||
             labelColorHex != nil ||
             isPrimaryAccountSuffixEdited
     }
@@ -1213,11 +1217,7 @@ class AppViewModel: ObservableObject {
                 "Enter exactly 4 digits, or enter NULL to hide the card number."
             return
         }
-        if selected.contains(where: {
-            $0.foregroundColorHex != nil ||
-                $0.labelColorHex != nil ||
-                $0.isPrimaryAccountSuffixEdited
-        }) {
+        if selected.contains(where: \.hasPendingDatabaseChanges) {
             showColorRiskAlert = true
         } else {
             applySkin()
@@ -1248,11 +1248,9 @@ class AppViewModel: ObservableObject {
                 "Enter exactly 4 digits, or enter NULL to hide the card number."
             return
         }
-        lastFlashChangedDatabase = selectedCardsWithChanges.contains {
-            $0.foregroundColorHex != nil ||
-                $0.labelColorHex != nil ||
-                $0.isPrimaryAccountSuffixEdited
-        }
+        lastFlashChangedDatabase = selectedCardsWithChanges.contains(
+            where: \.hasPendingDatabaseChanges
+        )
         
         isFlashing = true
         showLogs = true
@@ -1262,21 +1260,89 @@ class AppViewModel: ObservableObject {
         
         Task.detached {
             var flashFailed = false
-            let totalCards = Double(selectedCardsWithChanges.count)
-            for (idx, card) in selectedCardsWithChanges.enumerated() {
-                let preparedPath = "/tmp/aircard_prep_\(idx).png"
+            let artworkCards = selectedCardsWithChanges.filter {
+                $0.customImageURL != nil
+            }
+            let databaseCards = selectedCardsWithChanges.filter {
+                $0.hasPendingDatabaseChanges
+            }
+            let operationCount = artworkCards.count +
+                (databaseCards.isEmpty ? 0 : 1)
+            let totalOperations = Double(max(operationCount, 1))
+
+            func streamJSONOutput(
+                _ process: Process,
+                _ pipe: Pipe,
+                handler: ([String: Any]) async -> Void
+            ) async {
+                let handle = pipe.fileHandleForReading
+                var lineBuffer = ""
+
+                func processChunk(_ data: Data) async {
+                    guard let text = String(data: data, encoding: .utf8) else {
+                        return
+                    }
+                    lineBuffer.append(text)
+                    let parts = lineBuffer.components(separatedBy: .newlines)
+                    if parts.count > 1 {
+                        for line in parts.dropLast() {
+                            let trimmed = line.trimmingCharacters(
+                                in: .whitespacesAndNewlines
+                            )
+                            guard !trimmed.isEmpty,
+                                  let data = trimmed.data(using: .utf8),
+                                  let json = try? JSONSerialization
+                                    .jsonObject(with: data) as? [String: Any]
+                            else { continue }
+                            await handler(json)
+                        }
+                        lineBuffer = parts.last ?? ""
+                    }
+                }
+
+                while process.isRunning {
+                    let data = handle.availableData
+                    if data.isEmpty {
+                        usleep(50000)
+                        continue
+                    }
+                    await processChunk(data)
+                }
+                let remainingData = handle.readDataToEndOfFile()
+                if !remainingData.isEmpty {
+                    await processChunk(remainingData)
+                }
+                let finalLine = lineBuffer.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                if !finalLine.isEmpty,
+                   let data = finalLine.data(using: .utf8),
+                   let json = try? JSONSerialization
+                    .jsonObject(with: data) as? [String: Any] {
+                    await handler(json)
+                }
+                process.waitUntilExit()
+            }
+
+            for (idx, card) in artworkCards.enumerated() {
+                let preparedURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(
+                        "aircard-artwork-\(UUID().uuidString).png"
+                    )
+                let preparedPath = preparedURL.path
                 
                 await MainActor.run {
-                    self.statusText = "[\(idx + 1)/\(selectedCardsWithChanges.count)] Preparing card..."
-                    self.progress = (Double(idx) + 0.05) / totalCards
+                    self.statusText =
+                        "[\(idx + 1)/\(artworkCards.count)] Preparing artwork..."
+                    self.progress =
+                        (Double(idx) + 0.05) / totalOperations
                     self.log(
-                        "Flashing card [\(idx + 1)/\(selectedCardsWithChanges.count)]"
+                        "Flashing artwork [\(idx + 1)/\(artworkCards.count)]"
                     )
                 }
                 
                 if let imgURL = card.customImageURL {
                     // 1. Prepare image natively in Swift (0 external dependencies!)
-                    let preparedURL = URL(fileURLWithPath: preparedPath)
                     let prepped = AppViewModel.prepareCardImage(srcURL: imgURL, dstURL: preparedURL)
                     if !prepped {
                         let prepProcess = Process()
@@ -1284,9 +1350,28 @@ class AppViewModel: ObservableObject {
                         prepProcess.environment = AppViewModel.processEnvironment
                         prepProcess.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
                         prepProcess.arguments = ["aircard_backend.py", "--prepare-image", imgURL.path, preparedPath]
-                        try? prepProcess.run()
-                        prepProcess.waitUntilExit()
+                        do {
+                            try prepProcess.run()
+                            prepProcess.waitUntilExit()
+                            if prepProcess.terminationStatus != 0 {
+                                flashFailed = true
+                            }
+                        } catch {
+                            flashFailed = true
+                        }
                     }
+                }
+                if flashFailed ||
+                    !FileManager.default.fileExists(atPath: preparedPath) {
+                    flashFailed = true
+                    try? FileManager.default.removeItem(at: preparedURL)
+                    await MainActor.run {
+                        self.log(
+                            "Artwork preparation failed [\(idx + 1)/"
+                            + "\(artworkCards.count)]"
+                        )
+                    }
+                    break
                 }
                 
                 // 2. Flash card
@@ -1294,30 +1379,17 @@ class AppViewModel: ObservableObject {
                 flashProcess.executableURL = AppViewModel.pythonExecutableURL
                 flashProcess.environment = AppViewModel.processEnvironment
                 flashProcess.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
-                var flashArguments = [
+                flashProcess.arguments = [
                     "aircard_backend.py",
                     "--flash",
                     udid,
                     card.id,
-                    card.customImageURL == nil ? "-" : preparedPath
+                    preparedPath
                 ]
-                if let color = card.foregroundColorHex {
-                    flashArguments += ["--foreground-color", color]
-                }
-                if let color = card.labelColorHex {
-                    flashArguments += ["--label-color", color]
-                }
-                if card.isPrimaryAccountSuffixEdited {
-                    flashArguments += [
-                        "--primary-account-suffix",
-                        card.primaryAccountSuffixDraft
-                    ]
-                }
-                flashProcess.arguments = flashArguments
                 
                 let pipe = Pipe()
                 flashProcess.standardOutput = pipe
-                flashProcess.standardError = Pipe()
+                flashProcess.standardError = FileHandle.nullDevice
                 
                 do {
                     try flashProcess.run()
@@ -1327,116 +1399,226 @@ class AppViewModel: ObservableObject {
                     await MainActor.run {
                         self.log("Failed to launch card flasher: \(message)")
                     }
+                    try? FileManager.default.removeItem(at: preparedURL)
                     break
                 }
-                
-                let handle = pipe.fileHandleForReading
-                var lineBuffer = ""
-                
-                let handleJSONLine: (String) async -> Void = { line in
-                    guard !line.isEmpty,
-                          let lineData = line.data(using: .utf8),
-                          let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let msg = json["message"] as? String else { return }
-
-                    if let originals = json["originalColors"] as? [String: String] {
-                        await MainActor.run {
-                            guard let cardIndex = self.cards.firstIndex(where: { $0.id == card.id }) else { return }
-                            if self.cards[cardIndex].originalForegroundColor == nil {
-                                self.cards[cardIndex].originalForegroundColor = originals["foregroundColor"]
-                            }
-                            if self.cards[cardIndex].originalLabelColor == nil {
-                                self.cards[cardIndex].originalLabelColor = originals["labelColor"]
-                            }
-                        }
-                    }
-
-                    if let applied = json["appliedColors"] as? [String: String] {
-                        await MainActor.run {
-                            guard let cardIndex = self.cards.firstIndex(
-                                where: { $0.id == card.id }
-                            ) else { return }
-                            if let value = applied["foregroundColor"] {
-                                self.cards[cardIndex].currentForegroundColor = value
-                            }
-                            if let value = applied["labelColor"] {
-                                self.cards[cardIndex].currentLabelColor = value
-                            }
-                        }
-                    }
-                    
+                await streamJSONOutput(flashProcess, pipe) { json in
+                    guard let msg = json["message"] as? String else { return }
                     let step = (json["step"] as? NSNumber)?.doubleValue
                     let total = (json["total"] as? NSNumber)?.doubleValue
-                    
                     await MainActor.run {
                         if let step = step, let total = total, total > 0 {
                             let subProgress = step / total
-                            let currentProgress = (Double(idx) + subProgress) / totalCards
+                            let currentProgress =
+                                (Double(idx) + subProgress) /
+                                totalOperations
                             self.progress = min(currentProgress, 1.0)
                         }
-                        self.statusText = "[\(idx + 1)/\(selectedCardsWithChanges.count)] \(msg)"
+                        self.statusText =
+                            "[\(idx + 1)/\(artworkCards.count)] \(msg)"
                         self.log("  \(msg)")
                     }
                 }
-                
-                let processChunk: (Data) async -> Void = { data in
-                    guard let text = String(data: data, encoding: .utf8) else { return }
-                    lineBuffer.append(text)
-                    let parts = lineBuffer.components(separatedBy: .newlines)
-                    if parts.count > 1 {
-                        for line in parts.dropLast() {
-                            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !trimmed.isEmpty {
-                                await handleJSONLine(trimmed)
-                            }
-                        }
-                        lineBuffer = parts.last ?? ""
-                    }
-                }
-                
-                while flashProcess.isRunning {
-                    let data = handle.availableData
-                    if data.isEmpty { usleep(50000); continue }
-                    await processChunk(data)
-                }
-                
-                let remainingData = handle.readDataToEndOfFile()
-                if !remainingData.isEmpty {
-                    await processChunk(remainingData)
-                }
-                let finalLine = lineBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !finalLine.isEmpty {
-                    await handleJSONLine(finalLine)
-                }
-                flashProcess.waitUntilExit()
+                try? FileManager.default.removeItem(at: preparedURL)
 
                 if flashProcess.terminationStatus != 0 {
                     flashFailed = true
                     await MainActor.run {
                         self.log(
-                            "Card update failed [\(idx + 1)/"
-                            + "\(selectedCardsWithChanges.count)]"
+                            "Artwork update failed [\(idx + 1)/"
+                            + "\(artworkCards.count)]"
                         )
                     }
                     break
                 }
-                
                 await MainActor.run {
-                    if card.isPrimaryAccountSuffixEdited,
-                       let cardIndex = self.cards.firstIndex(
-                           where: { $0.id == card.id }
-                       ) {
-                        self.cards[cardIndex].currentPrimaryAccountSuffix =
-                            card.primaryAccountSuffixDraft == "NULL"
-                                ? nil
-                                : card.primaryAccountSuffixDraft
-                        self.cards[cardIndex].primaryAccountSuffixDraft =
-                            card.primaryAccountSuffixDraft
-                        self.cards[cardIndex].isPrimaryAccountSuffixEdited =
-                            false
-                    }
-                    self.progress = Double(idx + 1) / totalCards
+                    self.progress =
+                        Double(idx + 1) / totalOperations
                 }
+            }
+
+            if !flashFailed && !databaseCards.isEmpty {
+                var updates: [[String: Any]] = []
+                for (requestIndex, card) in databaseCards.enumerated() {
+                    var update: [String: Any] = [
+                        "cardHash": card.id,
+                        "requestIndex": requestIndex,
+                    ]
+                    if let color = card.foregroundColorHex {
+                        update["foregroundColor"] = color
+                    }
+                    if let color = card.labelColorHex {
+                        update["labelColor"] = color
+                    }
+                    if card.isPrimaryAccountSuffixEdited {
+                        update["primaryAccountSuffix"] =
+                            card.primaryAccountSuffixDraft
+                    }
+                    updates.append(update)
+                }
+
+                let updatesDirectory = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(
+                        "aircard-wallet-updates-\(UUID().uuidString)"
+                    )
+                let updatesURL = updatesDirectory
+                    .appendingPathComponent("updates.json")
+                defer {
+                    try? FileManager.default.removeItem(at: updatesDirectory)
+                }
+                do {
+                    try FileManager.default.createDirectory(
+                        at: updatesDirectory,
+                        withIntermediateDirectories: false,
+                        attributes: [.posixPermissions: 0o700]
+                    )
+                    let data = try JSONSerialization.data(withJSONObject: updates)
+                    try data.write(to: updatesURL, options: .atomic)
+                    try FileManager.default.setAttributes(
+                        [.posixPermissions: 0o600],
+                        ofItemAtPath: updatesURL.path
+                    )
+                } catch {
+                    flashFailed = true
+                    await MainActor.run {
+                        self.log(
+                            "Failed to prepare Wallet database update: "
+                            + error.localizedDescription
+                        )
+                    }
+                }
+                if !flashFailed {
+                    await MainActor.run {
+                        self.statusText = "Updating Wallet database once..."
+                        self.log(
+                            "Applying one Wallet database update for "
+                            + "\(databaseCards.count) card(s)..."
+                        )
+                    }
+
+                    let databaseProcess = Process()
+                    databaseProcess.executableURL =
+                        AppViewModel.pythonExecutableURL
+                    databaseProcess.environment =
+                        AppViewModel.processEnvironment
+                    databaseProcess.currentDirectoryURL =
+                        URL(fileURLWithPath: scriptDir)
+                    databaseProcess.arguments = [
+                        "aircard_backend.py",
+                        "--flash-wallet-db-batch",
+                        udid,
+                        updatesURL.path
+                    ]
+                    let pipe = Pipe()
+                    databaseProcess.standardOutput = pipe
+                    databaseProcess.standardError = FileHandle.nullDevice
+
+                    do {
+                        try databaseProcess.run()
+                        await streamJSONOutput(databaseProcess, pipe) { json in
+                            if let results = json["cards"] as? [[String: Any]] {
+                                await MainActor.run {
+                                    for result in results {
+                                        guard let requestIndex =
+                                            result["requestIndex"]
+                                                as? NSNumber,
+                                              requestIndex.intValue >= 0,
+                                              requestIndex.intValue <
+                                                databaseCards.count
+                                        else { continue }
+                                        let card =
+                                            databaseCards[
+                                                requestIndex.intValue
+                                            ]
+                                        guard let cardIndex =
+                                            self.cards.firstIndex(
+                                                where: { $0.id == card.id }
+                                            )
+                                        else { continue }
+                                        if let originals =
+                                            result["originalColors"]
+                                                as? [String: String] {
+                                            if self.cards[cardIndex]
+                                                .originalForegroundColor == nil {
+                                                self.cards[cardIndex]
+                                                    .originalForegroundColor =
+                                                    originals["foregroundColor"]
+                                            }
+                                            if self.cards[cardIndex]
+                                                .originalLabelColor == nil {
+                                                self.cards[cardIndex]
+                                                    .originalLabelColor =
+                                                    originals["labelColor"]
+                                            }
+                                        }
+                                        if let applied =
+                                            result["appliedColors"]
+                                                as? [String: String] {
+                                            if let value =
+                                                applied["foregroundColor"] {
+                                                self.cards[cardIndex]
+                                                    .currentForegroundColor =
+                                                    value
+                                            }
+                                            if let value =
+                                                applied["labelColor"] {
+                                                self.cards[cardIndex]
+                                                    .currentLabelColor = value
+                                            }
+                                        }
+                                        if card.isPrimaryAccountSuffixEdited {
+                                            self.cards[cardIndex]
+                                                .currentPrimaryAccountSuffix =
+                                                card.primaryAccountSuffixDraft ==
+                                                    "NULL"
+                                                    ? nil
+                                                    : card
+                                                        .primaryAccountSuffixDraft
+                                            self.cards[cardIndex]
+                                                .isPrimaryAccountSuffixEdited =
+                                                false
+                                        }
+                                    }
+                                }
+                            }
+                            guard let msg = json["message"] as? String else {
+                                return
+                            }
+                            let step =
+                                (json["step"] as? NSNumber)?.doubleValue
+                            let total =
+                                (json["total"] as? NSNumber)?.doubleValue
+                            await MainActor.run {
+                                if let step, let total, total > 0 {
+                                    self.progress = min(
+                                        (
+                                            Double(artworkCards.count) +
+                                            step / total
+                                        ) / totalOperations,
+                                        1.0
+                                    )
+                                }
+                                self.statusText = msg
+                                self.log("  \(msg)")
+                            }
+                        }
+                        if databaseProcess.terminationStatus != 0 {
+                            flashFailed = true
+                            await MainActor.run {
+                                self.log("Wallet database update failed.")
+                            }
+                        }
+                    } catch {
+                        flashFailed = true
+                        await MainActor.run {
+                            self.log(
+                                "Failed to launch Wallet database updater: "
+                                + error.localizedDescription
+                            )
+                        }
+                    }
+                }
+                try? FileManager.default.removeItem(at: updatesURL)
             }
             
             let didFail = flashFailed

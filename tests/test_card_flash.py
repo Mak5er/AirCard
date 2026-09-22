@@ -645,6 +645,107 @@ class CardFlashTests(unittest.TestCase):
         )
         self.assertIn("Reboot required", success["message"])
 
+    def test_batch_database_command_prepares_and_applies_once(self) -> None:
+        prepared = {
+            "cards": [
+                {
+                    "cardHash": CARD_HASH,
+                    "requestIndex": 0,
+                    "originalColors": {
+                        "foreground_color": "old foreground",
+                        "label_color": "old label",
+                        "primary_account_suffix": "1234",
+                    },
+                    "appliedColors": {
+                        "foreground_color": "new foreground",
+                        "label_color": "old label",
+                        "primary_account_suffix": "1234",
+                    },
+                },
+                {
+                    "cardHash": "ZYXWVUTSRQPONMLKJIHG=",
+                    "requestIndex": 1,
+                    "originalColors": {
+                        "foreground_color": "other foreground",
+                        "label_color": "other label",
+                        "primary_account_suffix": "9876",
+                    },
+                    "appliedColors": {
+                        "foreground_color": "other foreground",
+                        "label_color": "new label",
+                        "primary_account_suffix": "0042",
+                    },
+                },
+            ],
+        }
+        updates = [
+            {
+                "cardHash": CARD_HASH,
+                "requestIndex": 0,
+                "foregroundColor": "#AABBCC",
+            },
+            {
+                "cardHash": "ZYXWVUTSRQPONMLKJIHG=",
+                "requestIndex": 1,
+                "labelColor": "#010203",
+                "primaryAccountSuffix": "0042",
+            },
+        ]
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            updates_path = Path(temporary) / "updates.json"
+            updates_path.write_text(json.dumps(updates))
+            with (
+                patch.object(
+                    aircard_backend,
+                    "prepare_wallet_db_batch_patch",
+                    return_value=prepared,
+                ) as prepare,
+                patch.object(
+                    aircard_backend,
+                    "apply_wallet_db_batch_patch",
+                    return_value=[{}, {}],
+                ) as apply_database,
+                redirect_stdout(output),
+            ):
+                result = aircard_backend.cmd_flash_wallet_db_batch(
+                    "device",
+                    str(updates_path),
+                )
+
+        self.assertTrue(result)
+        prepare.assert_called_once_with("device", updates)
+        apply_database.assert_called_once_with("device", prepared)
+        success = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(success["type"], "success")
+        self.assertEqual(len(success["cards"]), 2)
+        self.assertEqual(
+            [card["requestIndex"] for card in success["cards"]],
+            [0, 1],
+        )
+        self.assertNotIn(CARD_HASH, output.getvalue())
+
+    def test_swift_flash_runs_one_database_batch_after_all_artwork(self) -> None:
+        source = (Path(aircard_backend.script_dir) / "AirCardApp.swift").read_text()
+        start = source.index("    func applySkin() {")
+        end = source.index(
+            "    // MARK: - Passcode Theme (.passthm) Handlers",
+            start,
+        )
+        flow = source[start:end]
+
+        artwork_loop = flow.index(
+            "for (idx, card) in artworkCards.enumerated()"
+        )
+        database_batch = flow.index(
+            "if !flashFailed && !databaseCards.isEmpty"
+        )
+        self.assertLess(artwork_loop, database_batch)
+        self.assertEqual(flow.count('"--flash-wallet-db-batch"'), 1)
+        self.assertNotIn('"--foreground-color"', flow)
+        self.assertNotIn('"--label-color"', flow)
+        self.assertNotIn('"--primary-account-suffix"', flow)
+
     def test_suffix_only_flash_is_database_only(self) -> None:
         prepared = self.prepared_database()
         prepared["appliedColors"]["primary_account_suffix"] = "0042"
@@ -883,6 +984,14 @@ class CardFlashTests(unittest.TestCase):
             write_file = Mock(return_value=True)
 
             with (
+                patch.object(
+                    aircard_backend,
+                    "prepare_wallet_db_patch",
+                ) as prepare_database,
+                patch.object(
+                    aircard_backend,
+                    "apply_wallet_db_patch",
+                ) as apply_database,
                 patch.object(aircard_backend, "write_file", write_file),
                 redirect_stdout(io.StringIO()),
             ):
@@ -893,6 +1002,8 @@ class CardFlashTests(unittest.TestCase):
                 )
 
         self.assertTrue(result)
+        prepare_database.assert_not_called()
+        apply_database.assert_not_called()
         writes = [call.args for call in write_file.call_args_list]
         pass_assets = {
             leaf: payload

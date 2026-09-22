@@ -12,6 +12,7 @@ import apply_card_skin
 
 
 CARD_HASH = "ABCDEFGHIJKLMNOPQRST="
+SECOND_CARD_HASH = "ZYXWVUTSRQPONMLKJIHG="
 
 
 def create_database(
@@ -291,7 +292,7 @@ class WalletDBPatchTests(unittest.TestCase):
                     "1234",
                 ),
                 (
-                    "ZYXWVUTSRQPONMLKJIHG=",
+                    SECOND_CARD_HASH,
                     "other foreground",
                     "other label",
                     "9876",
@@ -367,6 +368,126 @@ class WalletDBPatchTests(unittest.TestCase):
                 "primary_account_suffix": "1234",
             },
         )
+
+    def test_batch_patch_updates_multiple_cards_in_one_database_image(
+        self,
+    ) -> None:
+        result = apply_card_skin.patch_wallet_db_batch(
+            self.original,
+            [
+                {
+                    "cardHash": CARD_HASH,
+                    "requestIndex": 0,
+                    "foregroundColor": "#AABBCC",
+                },
+                {
+                    "cardHash": SECOND_CARD_HASH,
+                    "requestIndex": 1,
+                    "labelColor": "#010203",
+                    "primaryAccountSuffix": "0042",
+                },
+            ],
+        )
+
+        first = apply_card_skin.inspect_wallet_db_bytes(
+            result["patchedBytes"],
+            CARD_HASH,
+        )
+        second = apply_card_skin.inspect_wallet_db_bytes(
+            result["patchedBytes"],
+            SECOND_CARD_HASH,
+        )
+        self.assertEqual(first["foregroundColor"], "rgba(170, 187, 204, 1.00)")
+        self.assertEqual(second["labelColor"], "rgba(1, 2, 3, 1.00)")
+        self.assertEqual(second["primaryAccountSuffix"], "0042")
+        self.assertEqual(result["originalBytes"], self.original)
+        self.assertEqual(result["cardHashes"], [CARD_HASH, SECOND_CARD_HASH])
+        self.assertEqual(
+            [card["requestIndex"] for card in result["cards"]],
+            [0, 1],
+        )
+
+    def test_batch_prepare_extracts_wallet_database_once(self) -> None:
+        updates = [
+            {"cardHash": CARD_HASH, "foregroundColor": "#AABBCC"},
+            {"cardHash": SECOND_CARD_HASH, "labelColor": "#010203"},
+        ]
+        with patch.object(
+            apply_card_skin,
+            "_extract_wallet_db_main_without_sidecars",
+            return_value=self.original,
+        ) as extract_database:
+            result = apply_card_skin.prepare_wallet_db_batch_patch(
+                "device",
+                updates,
+            )
+
+        extract_database.assert_called_once_with("device", "prepare")
+        self.assertEqual(len(result["cards"]), 2)
+
+    def test_batch_apply_writes_wallet_database_once(self) -> None:
+        prepared = apply_card_skin.patch_wallet_db_batch(
+            self.original,
+            [
+                {"cardHash": CARD_HASH, "foregroundColor": "#AABBCC"},
+                {"cardHash": SECOND_CARD_HASH, "labelColor": "#010203"},
+            ],
+        )
+        with (
+            patch.object(
+                apply_card_skin,
+                "_extract_wallet_db_main_without_sidecars",
+                side_effect=[
+                    prepared["originalBytes"],
+                    prepared["patchedBytes"],
+                ],
+            ) as extract_database,
+            patch.object(
+                apply_card_skin,
+                "write_file",
+                return_value=True,
+            ) as write_database,
+        ):
+            inspected = apply_card_skin.apply_wallet_db_batch_patch(
+                "device",
+                prepared,
+            )
+
+        self.assertEqual(len(inspected), 2)
+        write_database.assert_called_once_with(
+            "device",
+            apply_card_skin.WALLET_DB_TARGET,
+            "passes23.sqlite",
+            prepared["patchedBytes"],
+            retries=1,
+        )
+        self.assertEqual(extract_database.call_count, 2)
+
+    def test_batch_rejects_duplicate_card_updates(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            apply_card_skin.patch_wallet_db_batch(
+                self.original,
+                [
+                    {"cardHash": CARD_HASH, "foregroundColor": "#AABBCC"},
+                    {"cardHash": CARD_HASH, "labelColor": "#010203"},
+                ],
+            )
+        with self.assertRaisesRegex(ValueError, "requestIndex"):
+            apply_card_skin.patch_wallet_db_batch(
+                self.original,
+                [
+                    {
+                        "cardHash": CARD_HASH,
+                        "requestIndex": 0,
+                        "foregroundColor": "#AABBCC",
+                    },
+                    {
+                        "cardHash": SECOND_CARD_HASH,
+                        "requestIndex": 0,
+                        "labelColor": "#010203",
+                    },
+                ],
+            )
 
     def test_suffix_patch_accepts_four_ascii_digits(self) -> None:
         result = apply_card_skin.patch_wallet_db(
