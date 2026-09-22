@@ -2,6 +2,49 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+private extension Color {
+    init?(airCardPassColor value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("#"), trimmed.count == 7,
+           let rgb = UInt64(trimmed.dropFirst(), radix: 16) {
+            self.init(
+                red: Double((rgb >> 16) & 0xFF) / 255.0,
+                green: Double((rgb >> 8) & 0xFF) / 255.0,
+                blue: Double(rgb & 0xFF) / 255.0
+            )
+            return
+        }
+        let components = value
+            .replacingOccurrences(of: "rgba(", with: "")
+            .replacingOccurrences(of: "rgb(", with: "")
+            .replacingOccurrences(of: ")", with: "")
+            .split(separator: ",")
+            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard (components.count == 3 || components.count == 4),
+              components.prefix(3).allSatisfy({ 0...255 ~= $0 }),
+              components.count == 3 || 0...1 ~= components[3] else {
+            return nil
+        }
+        self.init(
+            red: components[0] / 255.0,
+            green: components[1] / 255.0,
+            blue: components[2] / 255.0
+        )
+    }
+
+    var airCardHex: String? {
+        guard let color = NSColor(self).usingColorSpace(.deviceRGB) else {
+            return nil
+        }
+        return String(
+            format: "#%02X%02X%02X",
+            Int((color.redComponent * 255.0).rounded()),
+            Int((color.greenComponent * 255.0).rounded()),
+            Int((color.blueComponent * 255.0).rounded())
+        )
+    }
+}
+
 // MARK: - Models
 
 struct DeviceInfo: Codable {
@@ -14,18 +57,82 @@ struct DeviceInfo: Codable {
     var error: String?
 }
 
+struct CardBackupResponse: Decodable, Sendable {
+    let ok: Bool
+    let fileName: String?
+    let imageDataURI: String?
+    let imageAsset: String?
+    let foregroundColor: String?
+    let labelColor: String?
+    let primaryAccountSuffix: String?
+    let error: String?
+}
+
+enum CardBackupState: Equatable {
+    case idle
+    case loading
+    case loaded
+    case failed
+}
+
 struct CardItem: Identifiable, Hashable {
     let id: String
     var isSelected: Bool = true
     var customImageURL: URL? = nil
     var customImage: NSImage? = nil
+    var currentImage: NSImage? = nil
+    var currentForegroundColor: String? = nil
+    var currentLabelColor: String? = nil
+    var currentPrimaryAccountSuffix: String? = nil
+    var backupState: CardBackupState = .idle
+    var backupError: String? = nil
+    var foregroundColorHex: String? = nil
+    var labelColorHex: String? = nil
+    var originalForegroundColor: String? = nil
+    var originalLabelColor: String? = nil
+    var primaryAccountSuffixDraft: String = ""
+    var isPrimaryAccountSuffixEdited: Bool = false
+
+    var displayedPrimaryAccountSuffix: String? {
+        if isPrimaryAccountSuffixEdited {
+            return primaryAccountSuffixDraft.allSatisfy {
+                $0 >= "0" && $0 <= "9"
+            } && primaryAccountSuffixDraft.count == 4
+                ? primaryAccountSuffixDraft
+                : nil
+        }
+        return currentPrimaryAccountSuffix
+    }
+
+    var hasInvalidPrimaryAccountSuffix: Bool {
+        guard isPrimaryAccountSuffixEdited else { return false }
+        if primaryAccountSuffixDraft == "NULL" { return false }
+        return primaryAccountSuffixDraft.count != 4 ||
+            !primaryAccountSuffixDraft.allSatisfy {
+                $0 >= "0" && $0 <= "9"
+            }
+    }
+
+    var hasPendingChanges: Bool {
+        customImageURL != nil ||
+            foregroundColorHex != nil ||
+            labelColorHex != nil ||
+            isPrimaryAccountSuffixEdited
+    }
     
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
     
     static func == (lhs: CardItem, rhs: CardItem) -> Bool {
-        lhs.id == rhs.id && lhs.isSelected == rhs.isSelected && lhs.customImageURL == rhs.customImageURL
+        lhs.id == rhs.id &&
+            lhs.isSelected == rhs.isSelected &&
+            lhs.customImageURL == rhs.customImageURL &&
+            lhs.foregroundColorHex == rhs.foregroundColorHex &&
+            lhs.labelColorHex == rhs.labelColorHex &&
+            lhs.primaryAccountSuffixDraft == rhs.primaryAccountSuffixDraft &&
+            lhs.isPrimaryAccountSuffixEdited ==
+                rhs.isPrimaryAccountSuffixEdited
     }
 }
 
@@ -485,10 +592,13 @@ class AppViewModel: ObservableObject {
     @Published var cards: [CardItem] = []
     
     @Published var isFlashing = false
+    @Published var isBackingUp = false
     @Published var progress: Double = 0.0
     @Published var statusText: String = "Ready"
     @Published var logs: [String] = []
     @Published var showSuccessAlert = false
+    @Published var showColorRiskAlert = false
+    @Published var lastFlashChangedDatabase = false
     @Published var errorMessage: String?
     
     @Published var showAddCardSheet = false
@@ -716,6 +826,40 @@ class AppViewModel: ObservableObject {
             log("Cleared custom skin for: \(cardId.prefix(12))...")
         }
     }
+
+    func clearCardColors(for cardId: String) {
+        if let idx = cards.firstIndex(where: { $0.id == cardId }) {
+            if let original = cards[idx].originalForegroundColor {
+                let color = Color(airCardPassColor: original) ?? .white
+                cards[idx].foregroundColorHex = color.airCardHex
+            } else {
+                cards[idx].foregroundColorHex = nil
+            }
+            if let original = cards[idx].originalLabelColor {
+                let color = Color(airCardPassColor: original) ?? .white
+                cards[idx].labelColorHex = color.airCardHex
+            } else {
+                cards[idx].labelColorHex = nil
+            }
+            log("Restored original text colors for: \(cardId.prefix(12))...")
+        }
+    }
+
+    private func resetCardBackups() {
+        for index in cards.indices {
+            cards[index].currentImage = nil
+            cards[index].currentForegroundColor = nil
+            cards[index].currentLabelColor = nil
+            cards[index].currentPrimaryAccountSuffix = nil
+            if !cards[index].isPrimaryAccountSuffixEdited {
+                cards[index].primaryAccountSuffixDraft = ""
+            }
+            cards[index].originalForegroundColor = nil
+            cards[index].originalLabelColor = nil
+            cards[index].backupState = .idle
+            cards[index].backupError = nil
+        }
+    }
     
     // MARK: - Device Connection
     
@@ -728,7 +872,10 @@ class AppViewModel: ObservableObject {
         devicePollTimer?.invalidate()
         devicePollTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self = self, !self.isFlashing, !self.isScanningCards else { return }
+                guard let self = self,
+                      !self.isFlashing,
+                      !self.isScanningCards,
+                      !self.isBackingUp else { return }
                 self.checkDevice(silent: true)
             }
         }
@@ -769,16 +916,19 @@ class AppViewModel: ObservableObject {
             }
 
             let decoded = try? JSONDecoder().decode(DeviceInfo.self, from: data)
+            let launchErrorDescription = launchError?.localizedDescription
             await MainActor.run {
                 self.isCheckingDevice = false
-                if let launchError = launchError {
+                if let launchErrorDescription {
                     self.device = nil
-                    self.statusText = "Device detection failed: \(launchError.localizedDescription)"
+                    self.statusText =
+                        "Device detection failed: \(launchErrorDescription)"
                     return
                 }
                 guard let dev = decoded, dev.connected else {
                     // Empty/invalid output or no device: never keep a stale device around.
                     if previousUDID != nil { self.log("Device disconnected.") }
+                    if previousUDID != nil { self.resetCardBackups() }
                     self.device = decoded?.error == "device_helper_missing" ? decoded : nil
                     if decoded?.error == "device_helper_missing" {
                         self.statusText = "Device tools are missing from this build."
@@ -790,6 +940,7 @@ class AppViewModel: ObservableObject {
                 let changed = dev.udid != previousUDID
                 self.device = dev
                 if changed {
+                    self.resetCardBackups()
                     self.statusText = "Connected to \(dev.name ?? "iPhone")"
                     self.log("Device connected: \(dev.name ?? "iPhone") (\(dev.product ?? ""), iOS \(dev.version ?? ""))")
                 }
@@ -798,6 +949,133 @@ class AppViewModel: ObservableObject {
     }
 
     // MARK: - Live Card Scanner
+
+    func backupCard(id cardId: String, destination: URL) {
+        guard !isFlashing, !isScanningCards, !isBackingUp,
+              let udid = device?.udid,
+              let cardIndex = cards.firstIndex(where: { $0.id == cardId }) else {
+            errorMessage = "Stop scanning or flashing before backing up a card."
+            return
+        }
+
+        isBackingUp = true
+        cards[cardIndex].backupState = .loading
+        cards[cardIndex].backupError = nil
+        statusText = "Backing up Card #\(cardIndex + 1)…"
+        let scriptDir = self.scriptDir
+        let destinationPath = destination.path
+
+        Task.detached {
+            let process = Process()
+            process.executableURL = AppViewModel.pythonExecutableURL
+            process.environment = AppViewModel.processEnvironment
+            process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+            process.arguments = [
+                "aircard_backend.py",
+                "--backup-card",
+                udid,
+                cardId,
+                destinationPath
+            ]
+
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+
+            var response: CardBackupResponse?
+            var launchError: Error?
+            var exitStatus: Int32 = -1
+            do {
+                try process.run()
+                let watchdog = DispatchWorkItem {
+                    if process.isRunning { process.terminate() }
+                }
+                DispatchQueue.global().asyncAfter(
+                    deadline: .now() + 180,
+                    execute: watchdog
+                )
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                watchdog.cancel()
+                exitStatus = process.terminationStatus
+                response = try? JSONDecoder().decode(
+                    CardBackupResponse.self, from: data
+                )
+            } catch {
+                launchError = error
+            }
+
+            var imageData: Data?
+            if let dataURI = response?.imageDataURI,
+               let comma = dataURI.firstIndex(of: ",") {
+                imageData = Data(
+                    base64Encoded: String(dataURI[dataURI.index(after: comma)...])
+                )
+            }
+
+            let finalResponse = response
+            let finalImageData = imageData
+            let launchErrorDescription = launchError?.localizedDescription
+            let finalExitStatus = exitStatus
+            await MainActor.run {
+                self.isBackingUp = false
+                guard self.device?.udid == udid,
+                      let index = self.cards.firstIndex(
+                        where: { $0.id == cardId }
+                      ),
+                      self.cards[index].backupState == .loading else {
+                    return
+                }
+
+                guard launchErrorDescription == nil,
+                      finalExitStatus == 0,
+                      let result = finalResponse,
+                      result.ok,
+                      let foregroundColor = result.foregroundColor,
+                      let labelColor = result.labelColor else {
+                    let message =
+                        finalResponse?.error ??
+                        launchErrorDescription ??
+                        "Unable to back up the card"
+                    self.cards[index].backupState = .failed
+                    self.cards[index].backupError = message
+                    self.statusText = "Card backup failed: \(message)"
+                    self.showLogs = true
+                    self.log(
+                        "Could not back up Card #\(index + 1): \(message)"
+                    )
+                    return
+                }
+
+                self.cards[index].currentImage =
+                    finalImageData.flatMap { NSImage(data: $0) }
+                self.cards[index].currentForegroundColor = foregroundColor
+                self.cards[index].currentLabelColor = labelColor
+                self.cards[index].currentPrimaryAccountSuffix =
+                    result.primaryAccountSuffix
+                if !self.cards[index].isPrimaryAccountSuffixEdited {
+                    self.cards[index].primaryAccountSuffixDraft =
+                        result.primaryAccountSuffix ?? ""
+                }
+                self.cards[index].backupState = .loaded
+                self.cards[index].backupError =
+                    self.cards[index].currentImage == nil
+                        ? "Backup saved, but artwork preview could not be decoded"
+                        : nil
+                if self.cards[index].originalForegroundColor == nil {
+                    self.cards[index].originalForegroundColor = foregroundColor
+                }
+                if self.cards[index].originalLabelColor == nil {
+                    self.cards[index].originalLabelColor = labelColor
+                }
+                let fileName = result.fileName ?? destination.lastPathComponent
+                self.statusText = "Backup saved: \(fileName)"
+                self.log(
+                    "Saved Card #\(index + 1) backup as \(fileName)"
+                )
+            }
+        }
+    }
     
     func toggleCardScanning() {
         if isScanningCards {
@@ -809,6 +1087,10 @@ class AppViewModel: ObservableObject {
     
     func startCardScanning() {
         guard !isScanningCards else { return }
+        guard !isFlashing, !isBackingUp else {
+            statusText = "Wait for the current card operation to finish."
+            return
+        }
         guard let deviceHelper = AppViewModel.deviceHelperExecutableURL else {
             errorMessage = "Device tools are missing from this build."
             log("Bundled device_helper not found — cannot scan.")
@@ -894,7 +1176,6 @@ class AppViewModel: ObservableObject {
                                         if !self.cards.contains(where: { $0.id == candidate }) {
                                             self.cards.append(CardItem(id: candidate, isSelected: true))
                                             self.saveCards()
-                                            self.log("Found card: \(candidate)")
                                             NSSound(named: "Glass")?.play()
                                         }
                                     }
@@ -924,49 +1205,88 @@ class AppViewModel: ObservableObject {
     }
     
     // MARK: - Skin Application
+
+    func requestApplySkin() {
+        let selected = cards.filter { $0.isSelected && $0.hasPendingChanges }
+        if selected.contains(where: \.hasInvalidPrimaryAccountSuffix) {
+            errorMessage =
+                "Enter exactly 4 digits, or enter NULL to hide the card number."
+            return
+        }
+        if selected.contains(where: {
+            $0.foregroundColorHex != nil ||
+                $0.labelColorHex != nil ||
+                $0.isPrimaryAccountSuffixEdited
+        }) {
+            showColorRiskAlert = true
+        } else {
+            applySkin()
+        }
+    }
     
     func applySkin() {
         guard let udid = device?.udid else {
             errorMessage = "No iPhone connected."
             return
         }
-        let selectedCardsWithSkin = cards.filter { $0.isSelected && $0.customImageURL != nil }
-        guard !selectedCardsWithSkin.isEmpty else {
-            errorMessage = "Please assign a skin image to at least one selected card."
+        guard !isBackingUp else {
+            errorMessage = "Wait for the current card backup to finish."
             return
+        }
+        let selectedCardsWithChanges = cards.filter {
+            $0.isSelected && $0.hasPendingChanges
+        }
+        guard !selectedCardsWithChanges.isEmpty else {
+            errorMessage =
+                "Please assign an image, text color, or card number to at least one selected card."
+            return
+        }
+        guard !selectedCardsWithChanges.contains(
+            where: \.hasInvalidPrimaryAccountSuffix
+        ) else {
+            errorMessage =
+                "Enter exactly 4 digits, or enter NULL to hide the card number."
+            return
+        }
+        lastFlashChangedDatabase = selectedCardsWithChanges.contains {
+            $0.foregroundColorHex != nil ||
+                $0.labelColorHex != nil ||
+                $0.isPrimaryAccountSuffixEdited
         }
         
         isFlashing = true
         showLogs = true
         progress = 0.0
-        log("Starting skin application for \(selectedCardsWithSkin.count) card(s)...")
+        log("Starting card customization for \(selectedCardsWithChanges.count) card(s)...")
         let scriptDir = self.scriptDir
         
         Task.detached {
             var flashFailed = false
-            let totalCards = Double(selectedCardsWithSkin.count)
-            for (idx, card) in selectedCardsWithSkin.enumerated() {
-                guard let imgURL = card.customImageURL else { continue }
-                
+            let totalCards = Double(selectedCardsWithChanges.count)
+            for (idx, card) in selectedCardsWithChanges.enumerated() {
                 let preparedPath = "/tmp/aircard_prep_\(idx).png"
                 
                 await MainActor.run {
-                    self.statusText = "[\(idx + 1)/\(selectedCardsWithSkin.count)] Preparing skin for \(card.id.prefix(10))..."
+                    self.statusText = "[\(idx + 1)/\(selectedCardsWithChanges.count)] Preparing card..."
                     self.progress = (Double(idx) + 0.05) / totalCards
-                    self.log("Flashing card [\(idx + 1)/\(selectedCardsWithSkin.count)]: \(card.id)")
+                    self.log(
+                        "Flashing card [\(idx + 1)/\(selectedCardsWithChanges.count)]"
+                    )
                 }
                 
-                // 1. Prepare image natively in Swift (0 external dependencies!)
-                let preparedURL = URL(fileURLWithPath: preparedPath)
-                let prepped = AppViewModel.prepareCardImage(srcURL: imgURL, dstURL: preparedURL)
-                if !prepped {
-                    let prepProcess = Process()
-                    prepProcess.executableURL = AppViewModel.pythonExecutableURL
-                    prepProcess.environment = AppViewModel.processEnvironment
-                    prepProcess.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
-                    prepProcess.arguments = ["aircard_backend.py", "--prepare-image", imgURL.path, preparedPath]
-                    try? prepProcess.run()
-                    prepProcess.waitUntilExit()
+                if let imgURL = card.customImageURL {
+                    // 1. Prepare image natively in Swift (0 external dependencies!)
+                    let preparedURL = URL(fileURLWithPath: preparedPath)
+                    let prepped = AppViewModel.prepareCardImage(srcURL: imgURL, dstURL: preparedURL)
+                    if !prepped {
+                        let prepProcess = Process()
+                        prepProcess.executableURL = AppViewModel.pythonExecutableURL
+                        prepProcess.environment = AppViewModel.processEnvironment
+                        prepProcess.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+                        prepProcess.arguments = ["aircard_backend.py", "--prepare-image", imgURL.path, preparedPath]
+                        try? prepProcess.run()
+                        prepProcess.waitUntilExit()
+                    }
                 }
                 
                 // 2. Flash card
@@ -974,7 +1294,26 @@ class AppViewModel: ObservableObject {
                 flashProcess.executableURL = AppViewModel.pythonExecutableURL
                 flashProcess.environment = AppViewModel.processEnvironment
                 flashProcess.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
-                flashProcess.arguments = ["aircard_backend.py", "--flash", udid, card.id, preparedPath]
+                var flashArguments = [
+                    "aircard_backend.py",
+                    "--flash",
+                    udid,
+                    card.id,
+                    card.customImageURL == nil ? "-" : preparedPath
+                ]
+                if let color = card.foregroundColorHex {
+                    flashArguments += ["--foreground-color", color]
+                }
+                if let color = card.labelColorHex {
+                    flashArguments += ["--label-color", color]
+                }
+                if card.isPrimaryAccountSuffixEdited {
+                    flashArguments += [
+                        "--primary-account-suffix",
+                        card.primaryAccountSuffixDraft
+                    ]
+                }
+                flashProcess.arguments = flashArguments
                 
                 let pipe = Pipe()
                 flashProcess.standardOutput = pipe
@@ -999,6 +1338,32 @@ class AppViewModel: ObservableObject {
                           let lineData = line.data(using: .utf8),
                           let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                           let msg = json["message"] as? String else { return }
+
+                    if let originals = json["originalColors"] as? [String: String] {
+                        await MainActor.run {
+                            guard let cardIndex = self.cards.firstIndex(where: { $0.id == card.id }) else { return }
+                            if self.cards[cardIndex].originalForegroundColor == nil {
+                                self.cards[cardIndex].originalForegroundColor = originals["foregroundColor"]
+                            }
+                            if self.cards[cardIndex].originalLabelColor == nil {
+                                self.cards[cardIndex].originalLabelColor = originals["labelColor"]
+                            }
+                        }
+                    }
+
+                    if let applied = json["appliedColors"] as? [String: String] {
+                        await MainActor.run {
+                            guard let cardIndex = self.cards.firstIndex(
+                                where: { $0.id == card.id }
+                            ) else { return }
+                            if let value = applied["foregroundColor"] {
+                                self.cards[cardIndex].currentForegroundColor = value
+                            }
+                            if let value = applied["labelColor"] {
+                                self.cards[cardIndex].currentLabelColor = value
+                            }
+                        }
+                    }
                     
                     let step = (json["step"] as? NSNumber)?.doubleValue
                     let total = (json["total"] as? NSNumber)?.doubleValue
@@ -1009,7 +1374,7 @@ class AppViewModel: ObservableObject {
                             let currentProgress = (Double(idx) + subProgress) / totalCards
                             self.progress = min(currentProgress, 1.0)
                         }
-                        self.statusText = "[\(idx + 1)/\(selectedCardsWithSkin.count)] \(msg)"
+                        self.statusText = "[\(idx + 1)/\(selectedCardsWithChanges.count)] \(msg)"
                         self.log("  \(msg)")
                     }
                 }
@@ -1048,12 +1413,28 @@ class AppViewModel: ObservableObject {
                 if flashProcess.terminationStatus != 0 {
                     flashFailed = true
                     await MainActor.run {
-                        self.log("Card update failed for \(card.id.prefix(12))...")
+                        self.log(
+                            "Card update failed [\(idx + 1)/"
+                            + "\(selectedCardsWithChanges.count)]"
+                        )
                     }
                     break
                 }
                 
                 await MainActor.run {
+                    if card.isPrimaryAccountSuffixEdited,
+                       let cardIndex = self.cards.firstIndex(
+                           where: { $0.id == card.id }
+                       ) {
+                        self.cards[cardIndex].currentPrimaryAccountSuffix =
+                            card.primaryAccountSuffixDraft == "NULL"
+                                ? nil
+                                : card.primaryAccountSuffixDraft
+                        self.cards[cardIndex].primaryAccountSuffixDraft =
+                            card.primaryAccountSuffixDraft
+                        self.cards[cardIndex].isPrimaryAccountSuffixEdited =
+                            false
+                    }
                     self.progress = Double(idx + 1) / totalCards
                 }
             }
@@ -1068,7 +1449,7 @@ class AppViewModel: ObservableObject {
                 } else {
                     self.statusText = "Complete! All cards updated."
                     self.showSuccessAlert = true
-                    self.log("Skins successfully applied to all selected cards!")
+                    self.log("Card customizations successfully applied to all selected cards!")
                 }
             }
         }
@@ -1135,6 +1516,10 @@ class AppViewModel: ObservableObject {
     
     func flashPasscodeTheme() {
         guard let theme = loadedPasscodeTheme else { return }
+        guard !isBackingUp else {
+            errorMessage = "Wait for the current card backup to finish."
+            return
+        }
         guard let dev = device, dev.connected, let udid = dev.udid else {
             errorMessage = "Please connect and trust your iPhone first."
             return
@@ -1350,6 +1735,10 @@ class AppViewModel: ObservableObject {
     }
     
     func flashCreatedTheme() {
+        guard !isBackingUp else {
+            errorMessage = "Wait for the current card backup to finish."
+            return
+        }
         let keys = effectiveCreatorKeys
         guard !keys.isEmpty else {
             errorMessage = "Please add at least one key icon or import a poster image first."
@@ -1388,11 +1777,57 @@ struct WalletCardView: View {
     let cardIndex: Int
     let onPickImage: () -> Void
     let onClearImage: () -> Void
+    let onClearColors: () -> Void
+    let onBackup: () -> Void
+    let canBackup: Bool
     let onDelete: () -> Void
     
     @State private var isHovered = false
     @State private var isTargeted = false
     @State private var copied = false
+
+    private var currentDigitsColor: Color {
+        card.foregroundColorHex.flatMap(Color.init(airCardPassColor:))
+            ?? card.currentForegroundColor.flatMap(Color.init(airCardPassColor:))
+            ?? .white
+    }
+
+    private var currentLabelColor: Color {
+        card.labelColorHex.flatMap(Color.init(airCardPassColor:))
+            ?? card.currentLabelColor.flatMap(Color.init(airCardPassColor:))
+            ?? .white
+    }
+
+    private var digitsColorBinding: Binding<Color> {
+        Binding(
+            get: { currentDigitsColor },
+            set: { color in
+                card.foregroundColorHex = color.airCardHex
+                card.isSelected = true
+            }
+        )
+    }
+
+    private var labelColorBinding: Binding<Color> {
+        Binding(
+            get: { currentLabelColor },
+            set: { color in
+                card.labelColorHex = color.airCardHex
+                card.isSelected = true
+            }
+        )
+    }
+
+    private var primaryAccountSuffixBinding: Binding<String> {
+        Binding(
+            get: { card.primaryAccountSuffixDraft },
+            set: { value in
+                card.primaryAccountSuffixDraft = value
+                card.isPrimaryAccountSuffixEdited = true
+                card.isSelected = true
+            }
+        )
+    }
     
     var body: some View {
         VStack(spacing: 10) {
@@ -1425,6 +1860,15 @@ struct WalletCardView: View {
                         .buttonStyle(.plain)
                         .padding(10)
                         .help("Remove skin")
+
+                        Text("Pending change")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                            .padding(10)
                         
                         // Hover overlay: Change Skin
                         if isHovered {
@@ -1446,6 +1890,79 @@ struct WalletCardView: View {
                             }
                         }
                     }
+                } else if let img = card.currentImage {
+                    ZStack(alignment: .bottomLeading) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 290, height: 182)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        LinearGradient(
+                            colors: [.white.opacity(0.12), .clear, .black.opacity(0.18)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                        Text("Backed-up style")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(8)
+                            .padding(10)
+
+                        VStack(alignment: .trailing, spacing: 3) {
+                            Text("CARD")
+                                .foregroundColor(currentLabelColor)
+                        }
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                        .padding(12)
+                    }
+                } else if card.backupState == .loading {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color(NSColor.controlBackgroundColor))
+                        VStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.regular)
+                            Text("Backing up current card…")
+                                .font(.subheadline.weight(.medium))
+                            Text("The preview will appear here")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .frame(width: 290, height: 182)
+                } else if card.backupState == .loaded {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.gray.opacity(0.85), .black.opacity(0.9)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+
+                        VStack(alignment: .leading) {
+                            Text("Current colors")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(8)
+                            Spacer()
+                            Text("CARD")
+                                .foregroundColor(currentLabelColor)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .padding(14)
+                    }
+                    .frame(width: 290, height: 182)
                 } else {
                     // Empty / Placeholder Card Mockup
                     ZStack {
@@ -1502,11 +2019,35 @@ struct WalletCardView: View {
                     }
                     .frame(width: 290, height: 182)
                 }
+
+                if let suffix = card.displayedPrimaryAccountSuffix {
+                    Text("••••  \(suffix)")
+                        .font(
+                            .system(
+                                size: 17,
+                                weight: .semibold,
+                                design: .rounded
+                            )
+                        )
+                        .foregroundColor(currentDigitsColor)
+                        .shadow(color: .black.opacity(0.35), radius: 2)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: .bottomTrailing
+                        )
+                        .padding(14)
+                        .allowsHitTesting(false)
+                }
             }
             .frame(width: 290, height: 182)
             .shadow(color: .black.opacity(isHovered ? 0.22 : 0.12), radius: isHovered ? 10 : 5, y: isHovered ? 5 : 2)
             .onHover { h in isHovered = h }
-            .onTapGesture { onPickImage() }
+            .onTapGesture {
+                if card.backupState != .loading {
+                    onPickImage()
+                }
+            }
             .onDrop(of: [UTType.fileURL, UTType.image], isTargeted: $isTargeted) { providers in
                 guard let provider = providers.first else { return false }
                 if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
@@ -1545,6 +2086,129 @@ struct WalletCardView: View {
                 }
                 return false
             }
+
+            HStack(spacing: 8) {
+                switch card.backupState {
+                case .idle:
+                    Label("Not backed up", systemImage: "externaldrive")
+                        .foregroundColor(.secondary)
+                case .loading:
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Backing up…")
+                case .loaded:
+                    Label("Backup saved", systemImage: "checkmark.circle")
+                        .foregroundColor(.secondary)
+                    if let value = card.currentForegroundColor,
+                       let color = Color(airCardPassColor: value) {
+                        Circle()
+                            .fill(color)
+                            .frame(width: 10, height: 10)
+                            .overlay(Circle().stroke(.secondary.opacity(0.4)))
+                            .help("Current digits: \(value)")
+                    }
+                    if let value = card.currentLabelColor,
+                       let color = Color(airCardPassColor: value) {
+                        Circle()
+                            .fill(color)
+                            .frame(width: 10, height: 10)
+                            .overlay(Circle().stroke(.secondary.opacity(0.4)))
+                            .help("Current CARD label: \(value)")
+                    }
+                    if let warning = card.backupError {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundColor(.orange)
+                            .help(warning)
+                        Button("Back up again", action: onBackup)
+                            .buttonStyle(.link)
+                    }
+                case .failed:
+                    Label(
+                        "Backup failed",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(.red)
+                    .help(card.backupError ?? "Unknown error")
+                    Button("Retry", action: onBackup)
+                        .buttonStyle(.link)
+                }
+                Spacer()
+            }
+            .font(.caption2)
+            .frame(width: 290)
+
+            HStack(spacing: 10) {
+                ColorPicker(
+                    "Digits",
+                    selection: digitsColorBinding,
+                    supportsOpacity: false
+                )
+                    .help("Color of the card number")
+
+                ColorPicker(
+                    "CARD label",
+                    selection: labelColorBinding,
+                    supportsOpacity: false
+                )
+                    .help("Color of the CARD label")
+
+                if card.foregroundColorHex != nil || card.labelColorHex != nil {
+                    Button(
+                        card.originalForegroundColor != nil || card.originalLabelColor != nil
+                            ? "Restore original"
+                            : "Clear colors",
+                        action: onClearColors
+                    )
+                        .buttonStyle(.link)
+                        .font(.caption2)
+                }
+            }
+            .controlSize(.small)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    TextField(
+                        "4 digits or NULL",
+                        text: primaryAccountSuffixBinding
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(
+                                card.hasInvalidPrimaryAccountSuffix
+                                    ? Color.red
+                                    : Color.clear,
+                                lineWidth: 1
+                            )
+                    }
+
+                    Button("Set NULL") {
+                        card.primaryAccountSuffixDraft = "NULL"
+                        card.isPrimaryAccountSuffixEdited = true
+                        card.isSelected = true
+                    }
+                    .buttonStyle(.link)
+                    .help("Set the database value to NULL and hide the number")
+
+                    if card.isPrimaryAccountSuffixEdited {
+                        Button("Reset") {
+                            card.primaryAccountSuffixDraft =
+                                card.currentPrimaryAccountSuffix ?? ""
+                            card.isPrimaryAccountSuffixEdited = false
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+                if card.hasInvalidPrimaryAccountSuffix {
+                    Text(
+                        "Enter exactly 4 digits, or enter NULL to hide it."
+                    )
+                    .font(.caption2)
+                    .foregroundColor(.red)
+                }
+            }
+            .frame(width: 290)
+            .controlSize(.small)
             
             // Bottom Info & Controls
             HStack(spacing: 8) {
@@ -1554,6 +2218,11 @@ struct WalletCardView: View {
                 
                 Text("Card #\(cardIndex + 1)")
                     .font(.system(size: 12, weight: .semibold))
+
+                Button("Backup", action: onBackup)
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(card.backupState == .loading || !canBackup)
                 
                 // Monospace Hash Pill with Copy
                 HStack(spacing: 4) {
@@ -1582,11 +2251,11 @@ struct WalletCardView: View {
                 Spacer()
                 
                 // Status badge
-                if card.customImage != nil {
+                if card.hasPendingChanges {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(.green)
                         .font(.system(size: 12))
-                        .help("Skin assigned and ready")
+                        .help("Card changes ready")
                 }
                 
                 // Delete button
@@ -1617,13 +2286,15 @@ struct WalletCardView: View {
 struct ContentView: View {
     @StateObject private var vm = AppViewModel()
     @State private var showCredits = false
+    @State private var showBackupRiskAlert = false
+    @State private var pendingBackupIndex: Int?
     @State private var dragOffsetStart: CGPoint = .zero
     @State private var dragKeyStartOffsets: [String: CGPoint] = [:]
     @State private var isTargetedPoster = false
     @State private var isTargetedTheme = false
     
     private var readyToFlashCount: Int {
-        vm.cards.filter { $0.isSelected && $0.customImageURL != nil }.count
+        vm.cards.filter { $0.isSelected && $0.hasPendingChanges }.count
     }
     
     var body: some View {
@@ -1674,6 +2345,13 @@ struct ContentView: View {
                                     cardIndex: idx,
                                     onPickImage: { openCardImagePicker(for: vm.cards[idx].id) },
                                     onClearImage: { vm.clearCardImage(for: vm.cards[idx].id) },
+                                    onClearColors: { vm.clearCardColors(for: vm.cards[idx].id) },
+                                    onBackup: {
+                                        requestCardBackup(for: idx)
+                                    },
+                                    canBackup: vm.device?.connected == true &&
+                                        !vm.isFlashing &&
+                                        !vm.isBackingUp,
                                     onDelete: { vm.deleteCard(id: vm.cards[idx].id) }
                                 )
                             }
@@ -1707,9 +2385,47 @@ struct ContentView: View {
         } message: {
             if vm.selectedTab == .passcodeThemes {
                 Text("Passcode theme successfully applied!\n\nLock your iPhone (or restart) to see your new passcode keypad.")
+            } else if vm.lastFlashChangedDatabase {
+                Text("Wallet colors or card number were updated.\n\nA full iPhone restart is required. Reopening or force-closing Wallet will not apply the database changes.")
             } else {
-                Text("Skins successfully applied to all selected cards!\n\nPlease force-close the Wallet app on your iPhone (or reboot) to see your new designs.")
+                Text("Artwork successfully applied to all selected cards!\n\nForce-close and reopen Wallet to see the new artwork.")
             }
+        }
+        .alert(
+            "Wallet Database Risk",
+            isPresented: $vm.showColorRiskAlert
+        ) {
+            Button("Cancel", role: .cancel) {}
+            Button("I Accept the Risk", role: .destructive) {
+                vm.applySkin()
+            }
+        } message: {
+            Text(
+                "This changes the live Wallet database and can temporarily "
+                + "make cards disappear. Continue only if you accept the risk."
+                + "\n\nRecovery: restart the iPhone, open Wallet, wait briefly, "
+                + "swipe Wallet away, then open it again."
+            )
+        }
+        .alert(
+            "Wallet Database Backup Risk",
+            isPresented: $showBackupRiskAlert
+        ) {
+            Button("Cancel", role: .cancel) {
+                pendingBackupIndex = nil
+            }
+            Button("I Accept the Risk", role: .destructive) {
+                guard let index = pendingBackupIndex else { return }
+                pendingBackupIndex = nil
+                openCardBackupPanel(for: index)
+            }
+        } message: {
+            Text(
+                "Backup temporarily accesses the live Wallet database and can "
+                + "make cards disappear. The ZIP never contains the database."
+                + "\n\nRecovery: restart the iPhone, open Wallet, wait briefly, "
+                + "swipe Wallet away, then open it again."
+            )
         }
         .sheet(isPresented: $showCredits) {
             creditsSheet
@@ -1835,7 +2551,7 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .tint(vm.isScanningCards ? .red : .blue)
             .controlSize(.regular)
-            .disabled(vm.device?.connected != true)
+            .disabled(vm.device?.connected != true || vm.isBackingUp)
             
             Button(action: { vm.showAddCardSheet = true }) {
                 Label("Add Manually", systemImage: "plus")
@@ -3118,7 +3834,7 @@ struct ContentView: View {
                         .disabled(vm.loadedPasscodeTheme == nil || vm.isFlashing || vm.device?.connected != true)
                     }
                 } else {
-                    Button(action: { vm.applySkin() }) {
+                    Button(action: { vm.requestApplySkin() }) {
                         HStack(spacing: 6) {
                             if vm.isFlashing {
                                 ProgressView()
@@ -3136,7 +3852,12 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.green)
                     .controlSize(.regular)
-                    .disabled(readyToFlashCount == 0 || vm.isFlashing || vm.device?.connected != true)
+                    .disabled(
+                        readyToFlashCount == 0 ||
+                        vm.isFlashing ||
+                        vm.isBackingUp ||
+                        vm.device?.connected != true
+                    )
                 }
             }
             
@@ -3272,6 +3993,38 @@ struct ContentView: View {
         .frame(width: 440)
     }
     
+    private func requestCardBackup(for index: Int) {
+        guard vm.cards.indices.contains(index),
+              !vm.isFlashing,
+              !vm.isBackingUp else {
+            return
+        }
+        pendingBackupIndex = index
+        showBackupRiskAlert = true
+    }
+
+    private func openCardBackupPanel(for index: Int) {
+        guard vm.cards.indices.contains(index),
+              !vm.isFlashing,
+              !vm.isBackingUp else {
+            return
+        }
+        if vm.isScanningCards {
+            vm.stopCardScanning()
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "AirCard-Card-\(index + 1).zip"
+        panel.message = "Choose where to save this card backup."
+        if panel.runModal() == .OK, let destination = panel.url {
+            vm.backupCard(
+                id: vm.cards[index].id,
+                destination: destination
+            )
+        }
+    }
+
     private func openCardImagePicker(for cardId: String) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
