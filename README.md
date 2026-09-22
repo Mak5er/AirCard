@@ -67,7 +67,7 @@
 4. Optionally click **Backup** on a detected card and choose where to save its current artwork and Wallet database style.
 5. Click on any card mockup or drag & drop an image directly onto the card.
 6. Use the **Digits** and **CARD label** color pickers when you only want to change Wallet text colors. These settings are available with or without a custom image.
-7. Enter exactly four ASCII digits for the card-number suffix, or enter `NULL` to hide the card number. Blank input is not treated as `NULL`.
+7. Enter exactly four ASCII digits to change the suffix, or enter `NULL` to hide it. Leave the field blank to keep the current suffix unchanged.
 8. Click **Flash Skins** and review the database warning when colors or the card-number suffix are selected.
 9. For database changes, fully restart the iPhone; reopening Wallet is not enough. For artwork-only changes, force-close and reopen Wallet.
 

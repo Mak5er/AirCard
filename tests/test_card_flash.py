@@ -746,6 +746,23 @@ class CardFlashTests(unittest.TestCase):
         self.assertNotIn('"--label-color"', flow)
         self.assertNotIn('"--primary-account-suffix"', flow)
 
+        suffix_binding_start = source.index(
+            "private var primaryAccountSuffixBinding"
+        )
+        suffix_binding_end = source.index(
+            "\n    var body: some View",
+            suffix_binding_start,
+        )
+        suffix_binding = source[suffix_binding_start:suffix_binding_end]
+        self.assertIn(
+            "card.isPrimaryAccountSuffixEdited = !value.isEmpty",
+            suffix_binding,
+        )
+        self.assertIn(
+            'if card.isPrimaryAccountSuffixEdited {',
+            flow,
+        )
+
     def test_suffix_only_flash_is_database_only(self) -> None:
         prepared = self.prepared_database()
         prepared["appliedColors"]["primary_account_suffix"] = "0042"
