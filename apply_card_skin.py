@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Apply custom card skins to Apple Wallet passes using airlift exploit."""
 
+from __future__ import annotations
+
 import io
 import json
 import os
