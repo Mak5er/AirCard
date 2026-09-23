@@ -20,14 +20,18 @@ echo "==> [2/6] Scaffolding ${APP_NAME}.app bundle structure..."
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$BIN_DIR" "$LIB_DIR"
 
-# Write Info.plist
+# 准备声明简体中文为应用语言，让系统菜单和文件选择窗口与汉化界面保持一致。
 cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
+    <string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleExecutable</key>
     <string>AirCard</string>
     <key>CFBundleIdentifier</key>
@@ -125,6 +129,8 @@ if command -v create-dmg >/dev/null 2>&1; then
         "build/${APP_NAME}.dmg" \
         "$DMG_STAGING"
 else
+    # 未安装 create-dmg 时也带上中文使用说明，保证两种打包方式都能交付完整引导。
+    cp dmg_assets/README.txt "$DMG_STAGING/README.txt"
     ln -s /Applications "$DMG_STAGING/Applications"
     hdiutil create -volname "AirCard" -srcfolder "$DMG_STAGING" -ov -format UDZO "build/${APP_NAME}.dmg"
 fi

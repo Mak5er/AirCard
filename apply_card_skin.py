@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply custom card skins to Apple Wallet passes using airlift exploit."""
 
+# 接下来仅汉化供用户阅读的提示，设备标识、路径及 JSON 状态字段保持兼容。
 import io
 import json
 import os
@@ -123,7 +124,7 @@ def run_json(command: list[str], timeout: int) -> dict:
             result = val
             break
     if result is None:
-        raise RuntimeError(f"{Path(command[0]).name} failed: {completed.stderr}")
+        raise RuntimeError(f"{Path(command[0]).name} 执行失败：{completed.stderr}")
     result["exitCode"] = completed.returncode
     return result
 
@@ -154,11 +155,11 @@ def run_json_streaming(command: list[str], timeout: int, on_progress=None) -> di
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        raise TimeoutError(f"{Path(command[0]).name} timed out after {timeout}s")
+        raise TimeoutError(f"{Path(command[0]).name} 执行超时（{timeout} 秒）")
 
     if result is None:
         stderr = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"{Path(command[0]).name} failed: {stderr}")
+        raise RuntimeError(f"{Path(command[0]).name} 执行失败：{stderr}")
     result["exitCode"] = proc.returncode
     return result
 
@@ -186,7 +187,7 @@ def read_file(udid: str, target: str, leaf: str, retries: int = 1) -> "bytes | N
     None on failure. Test only on disposable paths before Wallet data.
     """
     if "/" in leaf or leaf in ("", ".", ".."):
-        raise ValueError("leaf must be a plain file name")
+        raise ValueError("文件名不能包含路径")
     for attempt in range(1, max(1, retries) + 1):
         try:
             token = secrets.token_hex(10)
@@ -463,7 +464,7 @@ def remove_files(udid: str, target: str, leaves: list[str], retries: int = 3) ->
     if not leaves:
         return True
     if any(not leaf or "/" in leaf or leaf in {".", ".."} for leaf in leaves):
-        raise ValueError("cache leaves must be plain file names")
+        raise ValueError("缓存文件名不能包含路径")
 
     for attempt in range(1, max(1, retries) + 1):
         try:
@@ -496,14 +497,14 @@ def remove_files(udid: str, target: str, leaves: list[str], retries: int = 3) ->
 
                 snapshot = native("snapshot-books", udid, os.fspath(snapshot_root))
                 if not operation_ok(snapshot):
-                    raise RuntimeError("could not snapshot Books state")
+                    raise RuntimeError("无法保存 Books 状态快照")
                 stage = native(
                     "stage", udid, source, link_destination, recovered,
                     os.fspath(archive_path), os.fspath(books_path),
                     os.fspath(snapshot_root),
                 )
                 if not operation_ok(stage):
-                    raise RuntimeError("could not stage cache removal")
+                    raise RuntimeError("无法准备缓存清理")
 
                 atc = run_json(
                     [os.fspath(AIRTRAFFIC_HOST), udid,
@@ -515,7 +516,7 @@ def remove_files(udid: str, target: str, leaves: list[str], retries: int = 3) ->
                 if atc.get("exitCode") != 0 or not atc.get("ok"):
                     native("finish-write", udid, source, link_destination,
                            recovered, os.fspath(snapshot_root))
-                    raise RuntimeError("could not relocate cache link")
+                    raise RuntimeError("无法移动缓存链接")
 
                 finish = native(
                     "finish-moved-removal", udid, source, link_destination,
@@ -545,24 +546,24 @@ def invalidate_cache(udid: str, card_hash: str) -> bool:
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: apply_card_skin.py <udid> <image_path> [card_hash ...]")
+        print("用法：apply_card_skin.py <设备 UDID> <图片路径> [卡片哈希值 ...]")
         return
     udid = sys.argv[1]
     img_path = Path(sys.argv[2])
     if not img_path.is_file():
-        print(f"Error: {img_path} not found")
+        print(f"错误：文件不存在：{img_path}")
         sys.exit(1)
     img_data = img_path.read_bytes()
     hashes = sys.argv[3:]
 
-    print(f"Loaded image from batter: {len(img_data)} bytes")
-    print(f"Targeting {len(hashes)} cards on device {udid}...")
+    print(f"已加载图片：{len(img_data)} 字节")
+    print(f"准备处理设备 {udid} 上的 {len(hashes)} 张卡片...")
 
     for index, h in enumerate(hashes, 1):
         target_dir = f"/var/mobile/Library/Passes/Cards/{h}.pkpass"
-        print(f"\n[{index}/{len(hashes)}] Processing card: {h}")
+        print(f"\n[{index}/{len(hashes)}] 正在处理卡片：{h}")
 
-        print("  -> Writing card artwork (fast batch)...")
+        print("  -> 正在批量写入卡片图片...")
         card_assets = [
             ("cardBackgroundCombined@3x.png", img_data),
             ("cardBackgroundCombined@2x.png", img_data),
@@ -572,13 +573,13 @@ def main():
             ok3x = write_file(udid, target_dir, "cardBackgroundCombined@3x.png", img_data)
             ok2x = write_file(udid, target_dir, "cardBackgroundCombined@2x.png", img_data)
             ok_batch = ok3x and ok2x
-        print(f"     Result: {'SUCCESS' if ok_batch else 'FAILED'}")
+        print(f"     结果：{'成功' if ok_batch else '失败'}")
 
-        print("  -> Invalidating pass cache...")
+        print("  -> 正在清除卡片缓存...")
         ok_cache = invalidate_cache(udid, h)
-        print(f"     Result: {'SUCCESS' if ok_cache else 'FAILED (or cache already empty)'}")
+        print(f"     结果：{'成功' if ok_cache else '失败（或缓存已为空）'}")
 
-    print("\nAll done! Please force close Wallet on your iPhone and reopen it.")
+    print("\n全部完成！请在 iPhone 上彻底关闭“钱包”App 后重新打开。")
 
 
 if __name__ == "__main__":

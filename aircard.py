@@ -6,6 +6,7 @@ Customizes Apple Pay and Wallet card skins without a jailbreak.
 
 from __future__ import annotations
 
+# 接下来仅汉化供用户阅读的提示，设备标识、路径及 JSON 状态字段保持兼容。
 import io
 import json
 import os
@@ -126,7 +127,7 @@ def get_connected_device() -> dict | None:
     return {
         "udid": device["udid"],
         "name": device.get("name") or "iPhone",
-        "version": device.get("version") or "Unknown",
+        "version": device.get("version") or "未知",
         "product": device["product"],
         "language": device.get("language") or "en",
         "locale": device.get("locale") or "",
@@ -145,18 +146,18 @@ def syslog_command(udid: str) -> list[str] | None:
 def capture_card_hashes(udid: str, existing_cards: list[str] | None = None) -> list[str]:
     """Listens to syslog and collects card hashes while the user opens Apple Wallet."""
     print("\n" + "=" * 60)
-    print("📡 CARD SCANNING MODE")
+    print("📡 卡片扫描模式")
     print("=" * 60)
-    print("To detect your cards:")
-    print("  👉 1) Double-click Side (Power) button to open Apple Pay.")
-    print("  👉 2) Authenticate with Face ID.")
-    print("  👉 3) Tap your card to trigger instant detection!")
-    print("Press ENTER when finished.")
+    print("请按以下步骤检测卡片：")
+    print("  👉 1) 连按两下侧边（电源）按钮，打开 Apple Pay。")
+    print("  👉 2) 通过面容 ID 验证。")
+    print("  👉 3) 轻点卡片，即可触发检测！")
+    print("完成后按回车键。")
     print("=" * 60 + "\n")
 
     cmd = syslog_command(udid)
     if not cmd:
-        print("\u274c Bundled device_helper is missing \u2014 cannot read the device log.")
+        print("❌ 缺少内置 device_helper，无法读取设备日志。")
         return list(existing_cards or [])
     process = subprocess.Popen(
         cmd,
@@ -232,7 +233,7 @@ def capture_card_hashes(udid: str, existing_cards: list[str] | None = None) -> l
                             continue
                         if h and h not in found_hashes:
                             found_hashes.add(h)
-                            print(f"  ✨ Detected card [{len(found_hashes)}]: {h}")
+                            print(f"  ✨ 已检测到卡片 [{len(found_hashes)}]：{h}")
 
     except KeyboardInterrupt:
         pass
@@ -250,7 +251,7 @@ def prepare_card_image(input_path: str) -> bytes:
     clean_path = input_path.strip().strip("'").strip('"')
     path = Path(clean_path).expanduser()
     if not path.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
+        raise FileNotFoundError(f"文件不存在：{path}")
 
     try:
         from PIL import Image, ImageOps
@@ -278,47 +279,47 @@ def prepare_card_image(input_path: str) -> bytes:
         Path(temp_out).unlink(missing_ok=True)
         return data
     except Exception as e:
-        raise RuntimeError(f"Failed to process image: {e}")
+        raise RuntimeError(f"图片处理失败：{e}")
 
 
 def main():
     print("=" * 60)
-    print("🎴 AirCard — Apple Wallet Card Skinner (via airlift)")
+    print("🎴 AirCard — Apple 钱包卡片皮肤工具（基于 airlift）")
     print("=" * 60)
 
     # 1. Device discovery
-    print("\n[1/5] Searching for connected device...")
+    print("\n[1/5] 正在搜索已连接的设备...")
     device = get_connected_device()
     if not device:
-        print("❌ iPhone not found! Connect your iPhone via USB and unlock the screen.")
+        print("❌ 未找到 iPhone！请通过 USB 连接并解锁屏幕。")
         sys.exit(1)
 
-    print(f"✅ Found: {device['name']} ({device['product']}, iOS {device['version']})")
+    print(f"✅ 已找到：{device['name']}（{device['product']}, iOS {device['version']}）")
     print(f"   UDID: {device['udid']}")
 
     # 2. Check airlift compatibility
     probe = native("probe", device["udid"])
     if not operation_ok(probe):
-        print("❌ Airlift pre-check failed. Ensure the device is paired and trusted.")
+        print("❌ Airlift 预检查失败，请确保设备已配对并信任此电脑。")
         sys.exit(1)
 
     # 3. Card discovery / selection
     saved_cards = load_saved_cards()
-    print(f"\n[2/5] Saved cards: {len(saved_cards)}")
+    print(f"\n[2/5] 已保存卡片：{len(saved_cards)} 张")
     for idx, h in enumerate(saved_cards, 1):
         print(f"  [{idx}] {h}")
 
-    print("\nChoose an action:")
-    print("  1 - Use existing cards")
-    print("  2 - Scan cards (open Wallet & tap card)")
-    print("  3 - Enter card hash(es) manually")
-    mode = input("Your choice [1]: ").strip()
+    print("\n请选择操作：")
+    print("  1 - 使用已有卡片")
+    print("  2 - 扫描卡片（打开钱包并轻点卡片）")
+    print("  3 - 手动输入卡片哈希值")
+    mode = input("请选择 [1]：").strip()
 
     hashes = saved_cards
     if mode == "2":
         hashes = capture_card_hashes(device["udid"], saved_cards)
     elif mode == "3":
-        manual = input("Enter card hashes separated by commas or spaces: ").strip()
+        manual = input("请输入卡片哈希值，用英文逗号或空格分隔：").strip()
         new_items = [x.strip() for x in re.split(r"[\s,;]+", manual) if len(x.strip()) >= 16]
         for item in new_items:
             if item not in hashes:
@@ -326,17 +327,17 @@ def main():
         save_cards(hashes)
 
     if not hashes:
-        print("❌ No cards available to flash.")
+        print("❌ 没有可写入的卡片。")
         sys.exit(1)
 
-    print(f"\n[3/5] Ready to flash cards ({len(hashes)}):")
+    print(f"\n[3/5] 待写入卡片（{len(hashes)} 张）：")
     for i, h in enumerate(hashes, 1):
         print(f"  [{i}] {h}")
 
-    print("\nSelect cards to customize:")
-    print("  'all' - apply to all cards")
-    print("  comma-separated numbers (e.g. 1,3)")
-    choice = input("Your choice [all]: ").strip().lower()
+    print("\n请选择要自定义的卡片：")
+    print("  'all' - 应用到所有卡片")
+    print("  输入编号，用英文逗号分隔（例如 1,3）")
+    choice = input("请选择 [all]：").strip().lower()
 
     if choice == "" or choice == "all":
         selected_hashes = hashes
@@ -345,47 +346,47 @@ def main():
             indices = [int(x.strip()) for x in choice.split(",") if x.strip()]
             selected_hashes = [hashes[i - 1] for i in indices if 1 <= i <= len(hashes)]
         except Exception:
-            print("Invalid input. Applying to all cards.")
+            print("输入无效，将应用到所有卡片。")
             selected_hashes = hashes
 
     if not selected_hashes:
-        print("❌ No cards selected.")
+        print("❌ 尚未选择卡片。")
         sys.exit(1)
 
     # 4. Prepare image
-    print(f"\n[4/5] Preparing image...")
+    print(f"\n[4/5] 正在准备图片...")
     while True:
-        img_input = input("Drag and drop image file into terminal (or enter path): ").strip()
+        img_input = input("将图片拖入终端，或输入文件路径：").strip()
         try:
             png_bytes = prepare_card_image(img_input)
-            print(f"✅ Image optimized for Apple Wallet ({len(png_bytes)} bytes)")
+            print(f"✅ 图片已优化为 Apple 钱包格式（{len(png_bytes)} 字节）")
             break
         except Exception as e:
-            print(f"❌ Error: {e}. Please specify another image.")
+            print(f"❌ 错误：{e}。请选择其他图片。")
 
     # 5. Flash cards
-    print(f"\n[5/5] Flashing skin to selected cards ({len(selected_hashes)})...")
+    print(f"\n[5/5] 正在为选中的 {len(selected_hashes)} 张卡片写入皮肤...")
 
     for idx, h in enumerate(selected_hashes, 1):
-        print(f"\n--- [{idx}/{len(selected_hashes)}] Card: {h} ---")
+        print(f"\n--- [{idx}/{len(selected_hashes)}] 卡片：{h} ---")
         pkpass_dir = f"/var/mobile/Library/Passes/Cards/{h}.pkpass"
 
         for asset in TARGET_ASSETS:
             ok = write_file(device["udid"], pkpass_dir, asset, png_bytes)
-            status = "OK" if ok else "FAIL"
+            status = "成功" if ok else "失败"
             print(f"  -> {asset}: {status}")
 
         for ext in [".cache", ".pkcache"]:
             cache_dir = f"/var/mobile/Library/Passes/Cards/{h}{ext}"
             for leaf in CACHE_FILES:
                 write_file(device["udid"], cache_dir, leaf, b"corrupted")
-        print("  -> System cache cleared (.cache & .pkcache)")
+        print("  -> 系统缓存已清除（.cache 和 .pkcache）")
 
     print("\n" + "=" * 60)
-    print("🎉 DONE! All selected cards successfully updated!")
+    print("🎉 完成！所有选中的卡片均已更新！")
     print("=" * 60)
-    print("1. Force close Apple Wallet on your iPhone.")
-    print("2. If the image does not update immediately, restart your iPhone.")
+    print("1. 在 iPhone 上彻底关闭“钱包”App。")
+    print("2. 如果图片没有立即更新，请重启 iPhone。")
     print("=" * 60)
 
 

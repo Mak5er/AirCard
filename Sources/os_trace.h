@@ -32,12 +32,13 @@ static uint16_t AirCardTraceUInt16(const uint8_t *bytes) {
     return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
 }
 
+// 帧读取失败时返回中文诊断；帧类型、长度校验和解码过程保持原有协议。
 static NSData *AirCardTraceReadFrame(AirCardTraceReceive receive,
                                     void *connection, uint8_t *type,
                                     NSString **error) {
     uint8_t header[5];
     if (!AirCardTraceReadExact(receive, connection, header, sizeof(header))) {
-        *error = @"The device log stream disconnected or ended unexpectedly.";
+        *error = @"设备日志流已断开或意外结束。";
         return nil;
     }
     *type = header[0];
@@ -48,17 +49,17 @@ static NSData *AirCardTraceReadFrame(AirCardTraceReceive receive,
     } else if (*type == 2) {
         length = AirCardTraceUInt32(header + 1);
     } else {
-        *error = @"The device returned an unsupported log frame type.";
+        *error = @"设备返回了不支持的日志帧类型。";
         return nil;
     }
     // Reject corrupt lengths before allocating or waiting for a payload.
     if (length == 0 || length > 16 * 1024 * 1024) {
-        *error = @"The device returned an invalid log frame length.";
+        *error = @"设备返回了无效的日志帧长度。";
         return nil;
     }
     NSMutableData *payload = [NSMutableData dataWithLength:length];
     if (!AirCardTraceReadExact(receive, connection, payload.mutableBytes, length)) {
-        *error = @"The device log stream ended in the middle of a record.";
+        *error = @"设备日志流在记录尚未接收完整时结束。";
         return nil;
     }
     return payload;

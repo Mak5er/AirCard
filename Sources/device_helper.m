@@ -249,6 +249,7 @@ static int ListDevices(void) {
     return status == 0 ? 0 : 2;
 }
 
+// 保留扫描器识别用的英文前缀，仅汉化其后的诊断信息，确保界面仍能接收日志。
 static int StreamDeviceLogs(AMDServiceConnectionRef connection) {
     // syslog_relay omits the Info/Debug resource lookups containing Wallet card
     // identifiers on iOS 18. Request the unified activity stream instead.
@@ -260,7 +261,7 @@ static int StreamDeviceLogs(AMDServiceConnectionRef connection) {
     };
     if (AMDServiceConnectionSendMessage(connection,
             (__bridge CFDictionaryRef)request, kCFPropertyListBinaryFormat_v1_0) != 0) {
-        fprintf(stderr, "AirCard scanner: Could not request device log streaming.\n");
+        fprintf(stderr, "AirCard scanner: 无法请求设备日志流。\n");
         return 2;
     }
 
@@ -274,11 +275,11 @@ static int StreamDeviceLogs(AMDServiceConnectionRef connection) {
     if (![status isKindOfClass:NSDictionary.class] ||
         ![status[@"Status"] isEqual:@"RequestSuccessful"]) {
         fprintf(stderr, "AirCard scanner: %s\n",
-                (error ?: @"The device refused to start log streaming.").UTF8String);
+                (error ?: @"设备拒绝启动日志流。").UTF8String);
         return 2;
     }
 
-    fprintf(stderr, "AirCard scanner: Connected to the unified device log stream.\n");
+    fprintf(stderr, "AirCard scanner: 已连接设备统一日志流。\n");
     while (YES) {
         @autoreleasepool {
             NSData *record = AirCardTraceReadFrame(AMDServiceConnectionReceive,
@@ -300,17 +301,17 @@ static int StreamDeviceLogs(AMDServiceConnectionRef connection) {
 
 static int RunSyslog(void) {
     if (FindTarget() != 0 || !TargetDevice) {
-        fprintf(stderr, "AirCard scanner: iPhone not found. Reconnect it via USB.\n");
+        fprintf(stderr, "AirCard scanner: 未找到 iPhone，请通过 USB 重新连接。\n");
         return 2;
     }
     AMDeviceRef device = TargetDevice;
     if (AMDeviceConnect(device) != 0) {
-        fprintf(stderr, "AirCard scanner: Could not connect to the iPhone.\n");
+        fprintf(stderr, "AirCard scanner: 无法连接 iPhone。\n");
         return 2;
     }
     if (!AMDeviceIsPaired(device)) AMDevicePair(device);
     if (AMDeviceValidatePairing(device) != 0 || AMDeviceStartSession(device) != 0) {
-        fprintf(stderr, "AirCard scanner: Unlock the iPhone and trust this Mac, then retry.\n");
+        fprintf(stderr, "AirCard scanner: 请解锁 iPhone 并信任此 Mac，然后重试。\n");
         AMDeviceDisconnect(device);
         return 2;
     }
@@ -319,7 +320,7 @@ static int RunSyslog(void) {
     if (AMDeviceSecureStartService(
             device, CFSTR("com.apple.os_trace_relay"), NULL, &connection) != 0 ||
         !connection) {
-        fprintf(stderr, "AirCard scanner: Could not open the device log service. Unlock the iPhone and retry.\n");
+        fprintf(stderr, "AirCard scanner: 无法打开设备日志服务，请解锁 iPhone 后重试。\n");
         AMDeviceStopSession(device);
         AMDeviceDisconnect(device);
         return 2;
