@@ -52,6 +52,11 @@
 5. Click **Flash Skins**.
 6. Force-close the **Wallet** app on your iPhone from the App Switcher (or reboot) to see your new custom card design!
 
+AirCard checks for connected iPhones automatically every three seconds; no refresh
+is needed. Disconnecting or switching phones clears the detected card list and
+saved identifiers. Scan cards again after reconnecting. Older saved records without
+a device association are cleared on first connection.
+
 ### If scanning finds no cards
 
 The scanner uses the iPhone's unified log service, including Info/Debug events.

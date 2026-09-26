@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 // MARK: - Models
 
-struct DeviceInfo: Codable {
+struct DeviceInfo: Codable, Equatable {
     var udid: String?
     var name: String?
     var version: String?
@@ -498,9 +498,11 @@ class AppViewModel: ObservableObject {
     @Published var manualHashInput = ""
     @Published var showLogs = false
     
+    private var deviceMonitorTask: Task<Void, Never>?
     private var scanProcess: Process?
     private let scriptDir: String
     private let storageKey = "mak5er.aircard.savedCards"
+    private let cardDeviceStorageKey = "mak5er.aircard.savedCards.deviceUDID"
     private let legacyStorageKey1 = "mak5er.savedCards"
     private let legacyStorageKey2 = "LumiCards.savedCards"
     
@@ -522,6 +524,20 @@ class AppViewModel: ObservableObject {
         
         loadSavedCards()
         checkDevice()
+        deviceMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    return
+                }
+                self?.checkDevice()
+            }
+        }
+    }
+
+    deinit {
+        deviceMonitorTask?.cancel()
     }
     
     func log(_ message: String) {
@@ -632,22 +648,25 @@ class AppViewModel: ObservableObject {
     func loadSavedCards() {
         var loaded: [String] = []
         
-        if let saved = UserDefaults.standard.stringArray(forKey: storageKey), !saved.isEmpty {
-            loaded.append(contentsOf: saved)
-        } else if let saved = UserDefaults.standard.stringArray(forKey: legacyStorageKey1), !saved.isEmpty {
-            loaded.append(contentsOf: saved)
-        } else if let saved = UserDefaults.standard.stringArray(forKey: legacyStorageKey2), !saved.isEmpty {
-            loaded.append(contentsOf: saved)
-        }
+        if let saved = UserDefaults.standard.stringArray(forKey: storageKey) {
+            loaded = saved
+        } else {
+            if let saved = UserDefaults.standard.stringArray(forKey: legacyStorageKey1), !saved.isEmpty {
+                loaded.append(contentsOf: saved)
+            } else if let saved = UserDefaults.standard.stringArray(forKey: legacyStorageKey2), !saved.isEmpty {
+                loaded.append(contentsOf: saved)
+            }
         
-        for p in ["~/.aircard_cards.json", "~/.lumicards_cards.json"] {
-            let jsonPath = NSString(string: p).expandingTildeInPath
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: jsonPath)),
-               let jsonHashes = try? JSONDecoder().decode([String].self, from: data) {
-                for h in jsonHashes where !loaded.contains(h) {
-                    loaded.append(h)
+            for p in ["~/.aircard_cards.json", "~/.lumicards_cards.json"] {
+                let jsonPath = NSString(string: p).expandingTildeInPath
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: jsonPath)),
+                   let jsonHashes = try? JSONDecoder().decode([String].self, from: data) {
+                    for h in jsonHashes where !loaded.contains(h) {
+                        loaded.append(h)
+                    }
                 }
             }
+
         }
         
         let dummyHashes = [
@@ -664,6 +683,8 @@ class AppViewModel: ObservableObject {
     func saveCards() {
         let hashes = cards.map { $0.id }
         UserDefaults.standard.set(hashes, forKey: storageKey)
+        UserDefaults.standard.set(device?.connected == true ? device?.udid : nil,
+                                  forKey: cardDeviceStorageKey)
         
         let jsonPath = NSString(string: "~/.aircard_cards.json").expandingTildeInPath
         if let data = try? JSONEncoder().encode(hashes) {
@@ -719,8 +740,11 @@ class AppViewModel: ObservableObject {
     // MARK: - Device Connection
     
     func checkDevice() {
+        guard !isCheckingDevice, !isFlashing else { return }
         isCheckingDevice = true
-        statusText = "Checking connected devices..."
+        if device == nil {
+            statusText = "Checking connected devices..."
+        }
         let scriptDir = self.scriptDir
         
         Task.detached {
@@ -739,33 +763,55 @@ class AppViewModel: ObservableObject {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 
-                if let dev = try? JSONDecoder().decode(DeviceInfo.self, from: data) {
-                    await MainActor.run {
-                        self.device = dev
-                        self.isCheckingDevice = false
-                        if dev.connected {
-                            self.statusText = "Connected to \(dev.name ?? "iPhone")"
-                            self.log("Device connected: \(dev.name ?? "iPhone") (\(dev.product ?? ""), iOS \(dev.version ?? ""))")
-                            self.applyDevicePreferences(from: dev)
-                        } else if dev.error == "device_helper_missing" {
-                            self.statusText = "Device tools are missing from this build."
-                            self.log("Bundled device_helper not found — detection cannot run.")
-                        } else {
-                            self.statusText = "No iPhone found. Please connect via USB."
-                        }
-                    }
-                } else {
-                    await MainActor.run {
-                        self.isCheckingDevice = false
-                        self.statusText = "No iPhone found. Please connect via USB."
-                    }
+                let dev = try JSONDecoder().decode(DeviceInfo.self, from: data)
+                await MainActor.run {
+                    self.applyDeviceDetection(dev)
                 }
             } catch {
                 await MainActor.run {
-                    self.isCheckingDevice = false
-                    self.statusText = "Device detection failed: \(error.localizedDescription)"
+                    self.applyDeviceDetection(DeviceInfo(connected: false, error: "detection_failed"))
                 }
             }
+        }
+    }
+
+    private func applyDeviceDetection(_ detected: DeviceInfo) {
+        isCheckingDevice = false
+        let previous = device
+        device = detected
+        // Repeated checks should not replace operation results or flood the log.
+        guard previous != detected else { return }
+
+        if isScanningCards && (!detected.connected || previous?.udid != detected.udid) {
+            stopCardScanning()
+        }
+
+        let savedDeviceID = UserDefaults.standard.string(forKey: cardDeviceStorageKey)
+        let restoredCardsBelongToAnotherDevice = previous == nil && !cards.isEmpty &&
+            (savedDeviceID == nil || savedDeviceID != detected.udid)
+        if !detected.connected || restoredCardsBelongToAnotherDevice ||
+            (previous?.connected == true && previous?.udid != detected.udid) {
+            clearAllCards()
+            manualHashInput = ""
+            showAddCardSheet = false
+        }
+
+        let message: String
+        if detected.connected {
+            if previous?.connected != true || previous?.udid != detected.udid {
+                applyDevicePreferences(from: detected)
+            }
+            message = "Connected to \(detected.name ?? "iPhone")"
+        } else if detected.error == "device_helper_missing" {
+            message = "Device tools are missing from this build."
+        } else if detected.error == "detection_failed" {
+            message = "Device detection failed. Retrying automatically..."
+        } else {
+            message = "No iPhone found. Please connect via USB."
+        }
+        log(message)
+        if !isFlashing && !isScanningCards {
+            statusText = message
         }
     }
     
@@ -1856,13 +1902,7 @@ struct ContentView: View {
                         .lineLimit(1)
                 }
                 
-                Button(action: { vm.checkDevice() }) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.plain)
-                .disabled(vm.isCheckingDevice)
-                .help("Refresh device connection")
+
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
