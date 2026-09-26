@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 
 typedef void *ATHostConnectionRef;
@@ -64,15 +65,30 @@ static BOOL ManifestContains(NSDictionary *manifest, NSString *identifier) {
     return NO;
 }
 
+static BOOL ManifestHasPNGForPDF(NSDictionary *manifest, NSString *pdfIdentifier) {
+    NSString *parent = [pdfIdentifier stringByDeletingLastPathComponent];
+    for (NSString *leaf in @[ @"cardBackgroundCombined@3x.png",
+                              @"cardBackgroundCombined@2x.png" ]) {
+        NSString *candidate = [parent stringByAppendingPathComponent:leaf];
+        if (ManifestContains(manifest, candidate)) return YES;
+    }
+    return NO;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc < 6 || argc % 2 != 0) {
+        // --fallback-pdf skips assets the pass does not contain, so a pass
+        // without PDF artwork still syncs its PNG artwork and pass.json.
+        BOOL fallbackPDF = argc > 2 &&
+            strcmp(argv[argc - 1], "--fallback-pdf") == 0;
+        int assetsEnd = fallbackPDF ? argc - 1 : argc;
+        if (assetsEnd < 6 || (assetsEnd - 2) % 2 != 0) {
             PrintJSON(@{ @"ok": @NO,
                          @"error": @"usage: airtraffic_host udid id path [id path ...]" });
             return 64;
         }
 
-        NSUInteger pairCount = (NSUInteger)(argc - 2) / 2;
+        NSUInteger pairCount = (NSUInteger)(assetsEnd - 2) / 2;
         if (pairCount > 2048) {
             PrintJSON(@{ @"ok": @NO, @"error": @"too many assets" });
             return 64;
@@ -80,7 +96,7 @@ int main(int argc, const char *argv[]) {
 
         NSString *deviceIdentifier = [NSString stringWithUTF8String:argv[1]];
         NSMutableArray<NSDictionary *> *assets = NSMutableArray.array;
-        for (int index = 2; index < argc; index += 2) {
+        for (int index = 2; index < assetsEnd; index += 2) {
             NSString *identifier = [NSString stringWithUTF8String:argv[index]];
             NSString *destination =
                 [NSString stringWithUTF8String:argv[index + 1]];
@@ -179,10 +195,20 @@ int main(int argc, const char *argv[]) {
             CFRelease(raw);
         }
 
+        NSMutableArray<NSDictionary *> *availableAssets = NSMutableArray.array;
         NSUInteger missing = 0;
-        for (NSDictionary *asset in assets)
-            if (!ManifestContains(manifest, asset[@"identifier"])) missing++;
-        if (missing) {
+        for (NSDictionary *asset in assets) {
+            NSString *identifier = asset[@"identifier"];
+            BOOL present = ManifestContains(manifest, identifier);
+            BOOL skipFallbackPDF = fallbackPDF &&
+                [[identifier lastPathComponent] isEqual:@"cardBackgroundCombined.pdf"] &&
+                ManifestHasPNGForPDF(manifest, identifier);
+            if (present && !skipFallbackPDF)
+                [availableAssets addObject:asset];
+            else if (!present)
+                missing++;
+        }
+        if (missing && !fallbackPDF) {
             ATHostConnectionRelease(connection);
             PrintJSON(@{ @"ok": @NO,
                          @"error": @"expected assets absent from manifest",
@@ -190,8 +216,8 @@ int main(int argc, const char *argv[]) {
             return 5;
         }
 
-        for (NSUInteger index = 0; index < assets.count; index++) {
-            NSDictionary *asset = assets[index];
+        for (NSUInteger index = 0; index < availableAssets.count; index++) {
+            NSDictionary *asset = availableAssets[index];
             ATHostConnectionSendAssetCompleted(
                 connection,
                 (__bridge CFStringRef)asset[@"identifier"],
@@ -206,7 +232,7 @@ int main(int argc, const char *argv[]) {
                     @"leaf": leaf ?: @"",
                 });
             }
-            if (index + 1 < assets.count) {
+            if (index + 1 < availableAssets.count) {
                 if (index == 0) {
                     usleep(400000);
                 } else {
@@ -220,7 +246,8 @@ int main(int argc, const char *argv[]) {
         PrintJSON(@{ @"ok": @YES,
                      @"syncAllowed": @YES,
                      @"readyForSync": @YES,
-                     @"fileCompleteMessages": @(assets.count) });
+                     @"fileCompleteMessages": @(availableAssets.count),
+                     @"missing": @(missing) });
         return 0;
     }
 }

@@ -73,6 +73,7 @@ cp apply_card_skin.py "$RESOURCES_DIR/"
 cp aircard.py "$RESOURCES_DIR/"
 cp aircard_backend.py "$RESOURCES_DIR/"
 cp card_assets.py "$RESOURCES_DIR/"
+cp card_identity.py "$RESOURCES_DIR/"
 
 # A bundle without these cannot talk to a device at all, so fail here instead
 # of shipping an app that reports "No iPhone found" for every user.

@@ -852,7 +852,8 @@ static BOOL SendAll(AMDServiceConnectionRef service, NSData *data) {
     return YES;
 }
 
-static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
+static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args,
+                           BOOL linkDestinationIsDirectory) {
     NSString *source = args[0];
     NSString *linkDestination = args[1];
     NSString *recovered = args[2];
@@ -916,7 +917,9 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
         hasPayload;
     BOOL directoriesReady = EnsureDirectory(session->afc, @"Books") &&
         EnsureDirectory(session->afc, @"Books/Sync");
-    BOOL booksWritten = sourceObjects && directoriesReady &&
+    BOOL linkDirectoryReady = !linkDestinationIsDirectory ||
+        EnsureDirectory(session->afc, linkDestination);
+    BOOL booksWritten = sourceObjects && directoriesReady && linkDirectoryReady &&
         AFCWriteFile(session->afc, @"Books/Sync/Books.plist", books);
     BOOL ok = serviceStatus == 0 && messageStatus == 0 && archiveSent &&
         sourceObjects && booksWritten;
@@ -930,7 +933,42 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
               @"zipResponseStatus": @(responseStatus),
               @"archiveSent": @(archiveSent),
               @"sourceObjectsPresent": @(sourceObjects),
-              @"booksWritten": @(booksWritten) };
+              @"booksWritten": @(booksWritten),
+              @"linkDirectoryReady": @(linkDirectoryReady) };
+}
+
+static NSDictionary *FinishWriteBatch(DeviceSession *session,
+                                      NSArray<NSString *> *args) {
+    NSString *source = args[0];
+    NSString *linkDestination = args[1];
+    NSString *recoveredPrefix = args[2];
+    NSString *snapshotRoot = args[3];
+    NSInteger count = [args[4] integerValue];
+    NSString *token = GeneratedToken(source, AIRLIFT_SOURCE_PREFIX);
+    BOOL safeArguments = token && count > 0 && count <= 1024 &&
+        [GeneratedToken(linkDestination, AIRLIFT_LINK_PREFIX) isEqual:token] &&
+        [GeneratedToken(recoveredPrefix, AIRLIFT_RECOVERED_PREFIX) isEqual:token];
+    if (!safeArguments) return @{ @"ok": @NO, @"safeArguments": @NO };
+
+    NSMutableArray<NSString *> *failures = NSMutableArray.array;
+    if (!RemoveGeneratedTree(session->afc, linkDestination, 0))
+        [failures addObject:@"relocated links"];
+    for (NSInteger index = 0; index < count; index++) {
+        NSString *path = [NSString stringWithFormat:@"%@-%ld", recoveredPrefix,
+                          (long)index];
+        if (!RemoveIfPresent(session->afc, path))
+            [failures addObject:[NSString stringWithFormat:@"recovered file %ld", (long)index]];
+    }
+    if (!RemoveGeneratedTree(session->afc, source, 0))
+        [failures addObject:@"StreamingZip tree"];
+    sleep(2);
+    NSDictionary *booksRestore = RestoreBooksState(session->afc, snapshotRoot);
+    BOOL booksRestored = [booksRestore[@"ok"] boolValue];
+    if (!booksRestored) [failures addObject:@"Books preimage"];
+    BOOL cleanupComplete = failures.count == 0;
+    return @{ @"ok": @(cleanupComplete), @"cleanupComplete": @(cleanupComplete),
+              @"failures": failures, @"booksPreimageRestored": @(booksRestored),
+              @"booksRestore": booksRestore };
 }
 
 static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
@@ -1131,7 +1169,16 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[6]],
                     [NSString stringWithUTF8String:argv[7]],
                     [NSString stringWithUTF8String:argv[8]],
-                ]);
+                ], NO);
+            } else if ([command isEqual:@"stage-batch"] && argc == 9) {
+                operation = Stage(&session, @[
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                    [NSString stringWithUTF8String:argv[6]],
+                    [NSString stringWithUTF8String:argv[7]],
+                    [NSString stringWithUTF8String:argv[8]],
+                ], YES);
             } else if ([command isEqual:@"finish"] && argc == 11) {
                 operation = Finish(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
@@ -1149,6 +1196,14 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[4]],
                     [NSString stringWithUTF8String:argv[5]],
                     [NSString stringWithUTF8String:argv[6]],
+                ]);
+            } else if ([command isEqual:@"finish-write-batch"] && argc == 8) {
+                operation = FinishWriteBatch(&session, @[
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                    [NSString stringWithUTF8String:argv[6]],
+                    [NSString stringWithUTF8String:argv[7]],
                 ]);
             } else if ([command isEqual:@"finish-moved-removal"] && argc == 8) {
                 operation = FinishMovedRemoval(&session, @[
@@ -1172,6 +1227,34 @@ int main(int argc, const char *argv[]) {
                                    @"size": @(data.length),
                                    @"path": mediaPath };
                 }
+            } else if ([command isEqual:@"afc-read-batch"] && argc >= 6 &&
+                       (argc - 4) % 2 == 0) {
+                NSString *outputDirectory = [NSString stringWithUTF8String:argv[3]];
+                NSMutableArray<NSString *> *missing = NSMutableArray.array;
+                NSMutableArray<NSString *> *failures = NSMutableArray.array;
+                NSMutableArray<NSDictionary *> *readFiles = NSMutableArray.array;
+                for (int index = 4; index < argc; index += 2) {
+                    NSString *mediaPath = [NSString stringWithUTF8String:argv[index]];
+                    NSString *localName = [NSString stringWithUTF8String:argv[index + 1]];
+                    if (!IsSafeRelativePath(mediaPath) || !localName.length ||
+                        [localName containsString:@"/"] || [localName containsString:@".."] ) {
+                        [failures addObject:mediaPath ?: @""];
+                        continue;
+                    }
+                    if (!AFCExists(session.afc, mediaPath)) {
+                        [missing addObject:mediaPath];
+                        continue;
+                    }
+                    NSData *data = AFCReadFileWithLimit(session.afc, mediaPath,
+                                                        32 * 1024 * 1024);
+                    NSString *localPath = [outputDirectory stringByAppendingPathComponent:localName];
+                    BOOL wrote = data && [data writeToFile:localPath
+                                                   options:NSDataWritingAtomic error:nil];
+                    if (!wrote) [failures addObject:mediaPath];
+                    else [readFiles addObject:@{@"path": mediaPath, @"size": @(data.length)}];
+                }
+                operation = @{@"ok": @(failures.count == 0), @"missing": missing,
+                              @"failures": failures, @"files": readFiles};
             }
         }
 

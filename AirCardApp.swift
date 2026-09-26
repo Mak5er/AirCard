@@ -22,6 +22,11 @@ struct CardItem: Identifiable, Hashable {
     var isSelected: Bool = true
     var customImageURL: URL? = nil
     var customImage: NSImage? = nil
+    var title: String? = nil
+    var detail: String? = nil
+    var deviceImage: NSImage? = nil
+    var isIdentifying: Bool = false
+    var walletMatched: Bool = false
     
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
@@ -30,6 +35,22 @@ struct CardItem: Identifiable, Hashable {
     static func == (lhs: CardItem, rhs: CardItem) -> Bool {
         lhs.id == rhs.id && lhs.isSelected == rhs.isSelected && lhs.customImageURL == rhs.customImageURL
     }
+}
+
+struct CardIdentity: Codable {
+    var ok: Bool
+    var card: String?
+    var title: String?
+    var detail: String?
+    var artwork: String?
+    var artworkType: String?
+    var error: String?
+}
+
+struct StoredCardMeta: Codable {
+    var title: String?
+    var detail: String?
+    var walletMatched: Bool?
 }
 
 enum AppTab: String, CaseIterable, Identifiable {
@@ -485,6 +506,8 @@ class AppViewModel: ObservableObject {
     @Published var device: DeviceInfo?
     @Published var isCheckingDevice = false
     @Published var isScanningCards = false
+    @Published var isMatchingCards = false
+    @Published var matchingProgress = ""
     @Published var cards: [CardItem] = []
     
     @Published var isFlashing = false
@@ -499,8 +522,13 @@ class AppViewModel: ObservableObject {
     @Published var showLogs = false
     
     private var scanProcess: Process?
+    private var scanReaderActive = false
+    private var identifyPending: [String] = []
+    private var matchBatchTotal = 0
+    private var matchBatchCompleted = 0
     private let scriptDir: String
     private let storageKey = "mak5er.aircard.savedCards"
+    private let metaKey = "mak5er.aircard.cardMeta"
     private let legacyStorageKey1 = "mak5er.savedCards"
     private let legacyStorageKey2 = "LumiCards.savedCards"
     
@@ -657,7 +685,25 @@ class AppViewModel: ObservableObject {
         ]
         loaded.removeAll { dummyHashes.contains($0) || ($0.contains("-") && $0.count == 36) }
         
-        self.cards = loaded.map { CardItem(id: $0, isSelected: true) }
+        var meta: [String: StoredCardMeta] = [:]
+        if let data = UserDefaults.standard.data(forKey: metaKey),
+           let decoded = try? JSONDecoder().decode([String: StoredCardMeta].self, from: data) {
+            meta = decoded
+        }
+        
+        self.cards = loaded.map { id in
+            var item = CardItem(id: id, isSelected: true)
+            if let saved = meta[id] {
+                item.title = saved.title
+                item.detail = saved.detail
+                item.walletMatched = saved.walletMatched ?? false
+            }
+            let face = Self.faceFile(for: id)
+            if let image = NSImage(contentsOf: face) {
+                item.deviceImage = image
+            }
+            return item
+        }
         log("Loaded \(cards.count) real card(s) from storage.")
     }
     
@@ -669,6 +715,31 @@ class AppViewModel: ObservableObject {
         if let data = try? JSONEncoder().encode(hashes) {
             try? data.write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
         }
+        
+        var meta: [String: StoredCardMeta] = [:]
+        for card in cards where card.title != nil || card.detail != nil || card.walletMatched {
+            meta[card.id] = StoredCardMeta(title: card.title, detail: card.detail, walletMatched: card.walletMatched)
+        }
+        if let data = try? JSONEncoder().encode(meta) {
+            UserDefaults.standard.set(data, forKey: metaKey)
+        }
+    }
+    
+    nonisolated private static func faceDirectory() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AirCard/card-faces", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+    
+    nonisolated static func faceFile(for id: String) -> URL {
+        let allowed = CharacterSet.alphanumerics
+        let name = String(id.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" })
+        return faceDirectory().appendingPathComponent(name + ".png")
+    }
+    
+    func removeFaceFile(for id: String) {
+        try? FileManager.default.removeItem(at: Self.faceFile(for: id))
     }
     
     func addCardHash(_ raw: String) {
@@ -689,11 +760,17 @@ class AppViewModel: ObservableObject {
     
     func deleteCard(id: String) {
         cards.removeAll { $0.id == id }
+        identifyPending.removeAll { $0 == id }
+        removeFaceFile(for: id)
         saveCards()
         log("Removed card: \(id)")
     }
     
     func clearAllCards() {
+        for card in cards {
+            removeFaceFile(for: card.id)
+        }
+        identifyPending.removeAll()
         cards.removeAll()
         saveCards()
         log("Cleared all cards.")
@@ -713,6 +790,126 @@ class AppViewModel: ObservableObject {
             cards[idx].customImageURL = nil
             cards[idx].customImage = nil
             log("Cleared custom skin for: \(cardId.prefix(12))...")
+        }
+    }
+    
+    func matchCardsToWallet() {
+        guard device?.connected == true, !isFlashing, !isScanningCards, !scanReaderActive, !isMatchingCards,
+              let udid = device?.udid else { return }
+        let pending = cards.filter { !$0.walletMatched }.map(\.id)
+        guard !pending.isEmpty else {
+            statusText = "All cards are already matched to Wallet."
+            log("Wallet matching skipped: all cards already have saved Wallet data.")
+            return
+        }
+        identifyCards(pending, udid: udid)
+    }
+    
+    func enqueueIdentify(_ id: String) {
+        guard device?.udid != nil, !isFlashing else { return }
+        if !identifyPending.contains(id) {
+            identifyPending.append(id)
+        }
+        pumpIdentify()
+    }
+    
+    private func pumpIdentify() {
+        guard !isScanningCards, !scanReaderActive, !isMatchingCards, !identifyPending.isEmpty else { return }
+        guard let udid = device?.udid else {
+            identifyPending.removeAll()
+            return
+        }
+        let pending = identifyPending
+        identifyPending.removeAll()
+        identifyCards(pending, udid: udid)
+    }
+    
+    /// Reads the name and current artwork for every card in one device sync.
+    private func identifyCards(_ ids: [String], udid: String) {
+        matchBatchTotal = ids.count
+        matchBatchCompleted = 0
+        matchingProgress = "0/\(matchBatchTotal)"
+        isMatchingCards = true
+        for id in ids {
+            if let idx = cards.firstIndex(where: { $0.id == id }) {
+                cards[idx].isIdentifying = true
+            }
+        }
+        statusText = "Matching \(ids.count) card(s) to Wallet..."
+        log("Reading the Wallet name and artwork for \(ids.count) card(s)...")
+        let artworkDir = Self.faceDirectory().path
+        let scriptDir = self.scriptDir
+        
+        Task.detached {
+            let identities = Self.runIdentifyCards(
+                scriptDir: scriptDir,
+                udid: udid,
+                cardIds: ids,
+                artworkDir: artworkDir
+            )
+            await MainActor.run {
+                let identitiesByID = Dictionary(
+                    identities.compactMap { identity in identity.card.map { ($0, identity) } },
+                    uniquingKeysWith: { _, latest in latest }
+                )
+                for (offset, id) in ids.enumerated() {
+                    if let idx = self.cards.firstIndex(where: { $0.id == id }) {
+                        self.cards[idx].isIdentifying = false
+                        if let identity = identitiesByID[id], identity.ok {
+                            let title = identity.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let detail = identity.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if let title, !title.isEmpty { self.cards[idx].title = title }
+                            if let detail, !detail.isEmpty { self.cards[idx].detail = detail }
+                            if let artwork = identity.artwork, let image = NSImage(contentsOfFile: artwork) {
+                                self.cards[idx].deviceImage = image
+                            }
+                            self.cards[idx].walletMatched = true
+                            let artworkNote = identity.artworkType.map { " (\($0) artwork)" } ?? ""
+                            self.log("Matched \(self.cards[idx].title ?? "card") to Wallet\(artworkNote).")
+                        } else {
+                            let error = identitiesByID[id]?.error ?? "batch read failed"
+                            self.log("Could not read Wallet data for \(id.prefix(8)) (\(error)).")
+                        }
+                    }
+                    self.matchBatchCompleted = offset + 1
+                    self.matchingProgress = "\(offset + 1)/\(self.matchBatchTotal)"
+                }
+                self.saveCards()
+                self.isMatchingCards = false
+                self.matchBatchTotal = 0
+                if self.device?.connected == true {
+                    self.statusText = "Connected to \(self.device?.name ?? "iPhone")"
+                }
+                self.pumpIdentify()
+            }
+        }
+    }
+
+    nonisolated private static func runIdentifyCards(
+        scriptDir: String,
+        udid: String,
+        cardIds: [String],
+        artworkDir: String
+    ) -> [CardIdentity] {
+        let process = Process()
+        process.executableURL = pythonExecutableURL
+        process.environment = processEnvironment
+        process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+        guard let idsData = try? JSONSerialization.data(withJSONObject: cardIds),
+              let idsJSON = String(data: idsData, encoding: .utf8) else { return [] }
+        process.arguments = ["aircard_backend.py", "--identify-cards", udid, idsJSON, artworkDir]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return data.split(separator: 10).compactMap { line in
+                try? JSONDecoder().decode(CardIdentity.self, from: Data(line))
+            }
+        } catch {
+            return []
         }
     }
     
@@ -833,11 +1030,13 @@ class AppViewModel: ObservableObject {
         proc.standardError = pipe
         
         self.scanProcess = proc
+        scanReaderActive = true
         // Launch before yielding so Stop cannot race with a pending launch.
         do {
             try proc.run()
         } catch {
             scanProcess = nil
+            scanReaderActive = false
             isScanningCards = false
             statusText = "Could not start card scanning."
             log("Syslog monitor failed to start: \(error.localizedDescription)")
@@ -918,6 +1117,9 @@ class AppViewModel: ObservableObject {
                                             self.saveCards()
                                             self.log("Found card: \(candidate)")
                                             NSSound(named: "Glass")?.play()
+                                            self.enqueueIdentify(candidate)
+                                        } else if self.cards.first(where: { $0.id == candidate })?.walletMatched != true {
+                                            self.enqueueIdentify(candidate)
                                         }
                                     }
                                 }
@@ -928,22 +1130,36 @@ class AppViewModel: ObservableObject {
                 }
                 proc.waitUntilExit()
                 await MainActor.run {
-                    guard self.scanProcess === proc else { return }
-                    self.scanProcess = nil
-                    self.isScanningCards = false
-                    self.statusText = "Card scanning ended. Check the log and reconnect the iPhone to retry."
-                    self.log("Syslog monitor exited (status \(proc.terminationStatus)). Total cards: \(self.cards.count).")
+                    let stoppedByUser = self.scanProcess == nil
+                    guard self.scanProcess === proc || stoppedByUser else { return }
+                    if self.scanProcess === proc {
+                        self.scanProcess = nil
+                        self.isScanningCards = false
+                        self.log("Syslog monitor exited (status \(proc.terminationStatus)). Total cards: \(self.cards.count).")
+                    }
+                    self.scanReaderActive = false
                     self.saveCards()
+                    self.pumpIdentify()
+                    if !self.isMatchingCards && !stoppedByUser {
+                        self.statusText = "Card scanning ended. Check the log and reconnect the iPhone to retry."
+                    }
                 }
             } catch {
                 if proc.isRunning { proc.terminate() }
                 proc.waitUntilExit()
                 await MainActor.run {
-                    guard self.scanProcess === proc else { return }
-                    self.scanProcess = nil
-                    self.log("Syslog monitor stopped: \(error.localizedDescription)")
-                    self.isScanningCards = false
-                    self.statusText = "Card scanning failed. Check the log and retry."
+                    let stoppedByUser = self.scanProcess == nil
+                    guard self.scanProcess === proc || stoppedByUser else { return }
+                    if self.scanProcess === proc {
+                        self.scanProcess = nil
+                        self.isScanningCards = false
+                        self.log("Syslog monitor stopped: \(error.localizedDescription)")
+                        if !stoppedByUser {
+                            self.statusText = "Card scanning failed. Check the log and retry."
+                        }
+                    }
+                    self.scanReaderActive = false
+                    self.pumpIdentify()
                 }
             }
         }
@@ -974,6 +1190,10 @@ class AppViewModel: ObservableObject {
             return
         }
         
+        guard !isMatchingCards else {
+            errorMessage = "Wait until Wallet matching finishes, then flash the skins."
+            return
+        }
         isFlashing = true
         showLogs = true
         progress = 0.0
@@ -1504,6 +1724,40 @@ struct WalletCardView: View {
                             }
                         }
                     }
+                } else if let img = card.deviceImage {
+                    ZStack {
+                        Image(nsImage: img)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 290, height: 182)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        
+                        LinearGradient(
+                            colors: [.white.opacity(0.12), .clear, .black.opacity(0.18)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        
+                        if isHovered || isTargeted {
+                            VStack {
+                                Spacer()
+                                HStack {
+                                    Spacer()
+                                    Label(isTargeted ? "Drop image here" : "Replace Skin", systemImage: "photo.badge.arrow.forward")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(.ultraThinMaterial)
+                                        .cornerRadius(20)
+                                    Spacer()
+                                }
+                                .padding(.bottom, 12)
+                            }
+                        }
+                    }
+                    .frame(width: 290, height: 182)
                 } else {
                     // Empty / Placeholder Card Mockup
                     ZStack {
@@ -1618,8 +1872,22 @@ struct WalletCardView: View {
                     .labelsHidden()
                     .help("Include in flash")
                 
-                Text("Card #\(cardIndex + 1)")
-                    .font(.system(size: 12, weight: .semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(card.title ?? "Card #\(cardIndex + 1)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    if let detail = card.detail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else if card.deviceImage != nil && card.customImage == nil {
+                        Text("Current Wallet card")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
                 
                 // Monospace Hash Pill with Copy
                 HStack(spacing: 4) {
@@ -1648,7 +1916,12 @@ struct WalletCardView: View {
                 Spacer()
                 
                 // Status badge
-                if card.customImage != nil {
+                if card.isIdentifying {
+                    ProgressView()
+                        .scaleEffect(0.55)
+                        .frame(width: 14, height: 14)
+                        .help("Reading this card from Wallet")
+                } else if card.customImage != nil {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(.green)
                         .font(.system(size: 12))
@@ -1901,7 +2174,27 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .tint(vm.isScanningCards ? .red : .blue)
             .controlSize(.regular)
-            .disabled(vm.device?.connected != true)
+            .disabled(vm.device?.connected != true || vm.isFlashing)
+            
+            if !vm.cards.isEmpty {
+                Button(action: { vm.matchCardsToWallet() }) {
+                    HStack(spacing: 6) {
+                        if vm.isMatchingCards {
+                            ProgressView()
+                                .scaleEffect(0.65)
+                                .frame(width: 16, height: 16)
+                        } else {
+                            Image(systemName: "link")
+                                .frame(width: 16, height: 16)
+                        }
+                        Text(vm.isMatchingCards ? "Matching… \(vm.matchingProgress)" : "Match to Wallet")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(vm.device?.connected != true || vm.isMatchingCards || vm.isFlashing || vm.isScanningCards)
+                .help("Read each card's name and current artwork so it matches the card in Wallet")
+            }
             
             Button(action: { vm.showAddCardSheet = true }) {
                 Label("Add Manually", systemImage: "plus")
@@ -1962,7 +2255,7 @@ struct ContentView: View {
                     .font(.caption)
                     .fontWeight(.bold)
                     .foregroundColor(.blue)
-                Text("Double-click Side button (Apple Pay), pass Face ID, then tap your card.")
+                Text("Double-click Side button (Apple Pay), pass Face ID, then tap your card. Its name and artwork are filled in from the phone.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -3213,7 +3506,7 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.green)
                     .controlSize(.regular)
-                    .disabled(readyToFlashCount == 0 || vm.isFlashing || vm.device?.connected != true)
+                    .disabled(readyToFlashCount == 0 || vm.isFlashing || vm.isMatchingCards || vm.device?.connected != true)
                 }
             }
             

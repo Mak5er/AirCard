@@ -96,6 +96,120 @@ def build_archive_multi(target: str, files: list[tuple[str, bytes]]) -> bytes:
     return output.getvalue()
 
 
+def build_archive_multi_targets(targets: list[str]) -> bytes:
+    """Stage one relocation link for each target directory in a read batch."""
+    metadata = plistlib.dumps({"Version": 2}, fmt=plistlib.FMT_BINARY, sort_keys=True)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", allowZip64=False) as archive:
+        archive.writestr(zip_info("META-INF/", stat.S_IFDIR | 0o755), b"")
+        archive.writestr(zip_info("META-INF/com.apple.ZipMetadata.plist", stat.S_IFREG | 0o600), metadata)
+        for directory in ("p0/", "p0/p1/", "p0/p1/p2/"):
+            archive.writestr(zip_info(directory, stat.S_IFDIR | 0o755), b"")
+        seen_dirs = set()
+        for index, target in enumerate(targets):
+            target_tail = target.lstrip("/")
+            link_name = "link" if index == 0 else f"link_{index}"
+            archive.writestr(
+                zip_info(f"p0/p1/p2/{link_name}", stat.S_IFLNK | 0o777),
+                f"../../../{target_tail}".encode(),
+            )
+            cursor = ""
+            for component in target_tail.split("/"):
+                cursor += component + "/"
+                if cursor not in seen_dirs:
+                    archive.writestr(zip_info(cursor, stat.S_IFDIR | 0o755), b"")
+                    seen_dirs.add(cursor)
+        archive.writestr(zip_info("payload_0", stat.S_IFREG | 0o600), b"")
+    return output.getvalue()
+
+
+def read_files_multi(udid: str, files: list[tuple[str, str]]) -> "list[bytes | None] | None":
+    """Read several pass files in one AirTraffic sync, then restore them.
+
+    Assets that are not in the device manifest are skipped, so a pass without
+    PDF artwork still returns its PNG artwork or pass.json.
+    """
+    if not files:
+        return []
+    for _target, leaf in files:
+        if "/" in leaf or leaf in ("", ".", ".."):
+            raise ValueError("leaf must be a plain file name")
+
+    try:
+        token = secrets.token_hex(10)
+        source = f"{SOURCE_PREFIX}{token}"
+        link_destination = f"{LINK_PREFIX}{token}"
+        recovered = f"{RECOVERED_PREFIX}{token}"
+        identifiers = []
+        destinations = []
+        for index, (target, leaf) in enumerate(files):
+            link_name = "link" if index == 0 else f"link_{index}"
+            link_identifier = f"../../{source}/p0/p1/p2/{link_name}"
+            identifiers.append(link_identifier)
+            destinations.append(posixpath.join(link_destination, link_name))
+            target_identifier = posixpath.relpath(posixpath.join(target, leaf), AIRLOCK_ROOT)
+            identifiers.append(target_identifier)
+            destinations.append(f"{recovered}-{index}")
+
+        with tempfile.TemporaryDirectory(prefix="airlift-read-batch-") as temporary:
+            work = Path(temporary)
+            archive_path = work / "payload.zip"
+            books_path = work / "Books.plist"
+            snapshot_root = work / "books-snapshot"
+            output_root = work / "files"
+            snapshot_root.mkdir()
+            output_root.mkdir()
+            archive_path.write_bytes(build_archive_multi_targets([target for target, _ in files]))
+            books_path.write_bytes(build_books(identifiers))
+
+            snapshot = native("snapshot-books", udid, os.fspath(snapshot_root))
+            if not operation_ok(snapshot):
+                return None
+            stage = native("stage-batch", udid, source, link_destination, recovered,
+                           os.fspath(archive_path), os.fspath(books_path), os.fspath(snapshot_root))
+            if not operation_ok(stage):
+                if stage.get("operation", {}).get("cleanupAuthorized"):
+                    native("finish-write-batch", udid, source, link_destination,
+                           recovered, os.fspath(snapshot_root), str(len(files)))
+                return None
+
+            atc_cmd = [os.fspath(AIRTRAFFIC_HOST), udid]
+            for identifier, destination in zip(identifiers, destinations):
+                atc_cmd.extend((identifier, destination))
+            atc_cmd.append("--fallback-pdf")
+            atc = run_json(atc_cmd, timeout=max(120, len(files) * 3))
+            if not (atc.get("exitCode") == 0 and atc.get("ok")):
+                return None  # Leave staged/recovered files intact for manual recovery.
+
+            read_args = ["afc-read-batch", udid, os.fspath(output_root)]
+            for index in range(len(files)):
+                read_args.extend((f"{recovered}-{index}", f"item_{index}.bin"))
+            read = native(*read_args)
+            if not operation_ok(read):
+                return None  # Do not remove the only on-device copies.
+            values = []
+            for index in range(len(files)):
+                local_file = output_root / f"item_{index}.bin"
+                values.append(local_file.read_bytes() if local_file.is_file() else None)
+
+            grouped: dict[str, list[tuple[str, bytes]]] = {}
+            for (target, leaf), payload in zip(files, values):
+                if payload is not None:
+                    grouped.setdefault(target, []).append((leaf, payload))
+            for target, payloads in grouped.items():
+                if not write_files_batch(udid, target, payloads, retries=3):
+                    return None  # Keep recovered copies and outer snapshot for recovery.
+
+            finish = native("finish-write-batch", udid, source, link_destination,
+                            recovered, os.fspath(snapshot_root), str(len(files)))
+            if not operation_ok(finish):
+                return None
+            return values
+    except Exception:
+        # Preserve staged data for recovery after any post-stage error.
+        return None
+
+
 def build_books(identifiers: list[str]) -> bytes:
     rows = [
         {"Persistent ID": identifier, "Item ID": str(index), "DSID": "1"}

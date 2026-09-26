@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -43,6 +44,7 @@ for lp in lib_paths:
 from apply_card_skin import (
     native,
     operation_ok,
+    read_files_multi,
     write_file,
     write_files_batch,
     remove_files,
@@ -51,6 +53,7 @@ from apply_card_skin import (
     DEVICE_HELPER,
 )
 from card_assets import CACHE_FILES, build_card_assets
+from card_identity import identity_from_pass, is_pdf, is_png, parse_pass_json
 from aircard import (
     find_device_helper,
     get_connected_device,
@@ -123,6 +126,112 @@ def cmd_prepare_image(src: str, dst: str):
         print(json.dumps({"ok": True, "path": dst}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
+
+
+_CARD_HASH = re.compile(r"^[A-Za-z0-9_+=-]{16,64}$")
+_ARTWORK_LEAVES = (
+    "cardBackgroundCombined@3x.png",
+    "cardBackgroundCombined@2x.png",
+)
+
+
+def _face_file(root: Path, card_hash: str) -> Path:
+    """Name the cached face the same way AppViewModel.faceFile(for:) does."""
+    name = "".join(character if character.isalnum() else "_" for character in card_hash)
+    return root / f"{name}.png"
+
+
+def _pdf_to_png(pdf: bytes, dest: Path) -> bool:
+    with tempfile.TemporaryDirectory(prefix="aircard-face-") as temporary:
+        source = Path(temporary) / "card.pdf"
+        rendered = Path(temporary) / "card.png"
+        source.write_bytes(pdf)
+        subprocess.run(
+            ["/usr/bin/sips", "-s", "format", "png", str(source), "--out", str(rendered)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        data = rendered.read_bytes()
+    if not is_png(data):
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return True
+
+
+def cmd_identify_cards(udid: str, card_hashes_json: str, artwork_dir: str) -> None:
+    """Read files for several cards in one device transfer, then parse locally."""
+    try:
+        card_hashes = json.loads(card_hashes_json)
+    except (TypeError, json.JSONDecodeError):
+        print(json.dumps({"ok": False, "error": "invalid_card_list"}), flush=True)
+        return
+    if not isinstance(card_hashes, list):
+        print(json.dumps({"ok": False, "error": "invalid_card_list"}), flush=True)
+        return
+    root = Path(artwork_dir)
+    if not root.is_absolute() or ".." in root.parts:
+        print(json.dumps({"ok": False, "error": "invalid_artwork_path"}), flush=True)
+        return
+    valid_ids = [card_hash for card_hash in card_hashes
+                 if isinstance(card_hash, str) and _CARD_HASH.fullmatch(card_hash)]
+    # PNGs and PDFs enter one sync; the host skips a PDF whenever the matching
+    # PNG is present in the device manifest.
+    leaves = ("pass.json",) + _ARTWORK_LEAVES + ("cardBackgroundCombined.pdf",)
+    requests = [
+        (f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass", leaf)
+        for card_hash in valid_ids for leaf in leaves
+    ]
+    try:
+        payloads = read_files_multi(udid, requests)
+    except Exception:
+        payloads = None
+    payload_map = {}
+    if payloads is not None:
+        payload_map = {
+            (card_hash, leaf): payloads[index * len(leaves) + leaf_index]
+            for index, card_hash in enumerate(valid_ids)
+            for leaf_index, leaf in enumerate(leaves)
+        }
+
+    for card_hash in card_hashes:
+        if not isinstance(card_hash, str) or not _CARD_HASH.fullmatch(card_hash):
+            result = {"ok": False, "card": card_hash if isinstance(card_hash, str) else None,
+                      "error": "invalid_card_id"}
+        elif payloads is None:
+            result = {"ok": False, "card": card_hash, "error": "batch_read_failed"}
+        else:
+            pass_data = payload_map.get((card_hash, "pass.json"))
+            payload = parse_pass_json(pass_data) if pass_data else None
+            label = identity_from_pass(payload) if payload else {"title": None, "detail": None}
+            title, detail = label["title"], label["detail"]
+            artwork = None
+            artwork_type = None
+            dest = _face_file(root, card_hash)
+            for leaf in _ARTWORK_LEAVES:
+                data = payload_map.get((card_hash, leaf))
+                if data and is_png(data):
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(data)
+                    artwork = str(dest)
+                    artwork_type = "PNG"
+                    break
+            if artwork is None:
+                pdf = payload_map.get((card_hash, "cardBackgroundCombined.pdf"))
+                if pdf and is_pdf(pdf):
+                    try:
+                        if _pdf_to_png(pdf, dest):
+                            artwork = str(dest)
+                            artwork_type = "PDF"
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+            result = ({"ok": True, "card": card_hash, "title": title,
+                       "detail": detail, "artwork": artwork,
+                       "artworkType": artwork_type}
+                      if title or detail or artwork else
+                      {"ok": False, "card": card_hash, "error": "no_display_info"})
+        print(json.dumps(result), flush=True)
 
 
 def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
@@ -578,6 +687,8 @@ def main():
     elif norm_cmd == "flash" and len(sys.argv) > 4:
         if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4]):
             sys.exit(1)
+    elif norm_cmd == "identify-cards" and len(sys.argv) > 4:
+        cmd_identify_cards(sys.argv[2], sys.argv[3], sys.argv[4])
     elif norm_cmd == "inspect-passthm" and len(sys.argv) > 2:
         cmd_inspect_passthm(sys.argv[2])
     elif norm_cmd == "flash-passthm" and len(sys.argv) > 3:
