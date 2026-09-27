@@ -8,8 +8,10 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import aircard
 import aircard_backend
 import apply_card_skin
+import card_assets
 
 
 PNG_1X1 = base64.b64decode(
@@ -134,6 +136,12 @@ class CardFlashTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(messages[-1]["type"], "error")
         write_file.assert_not_called()
+
+    def test_cli_invalidates_same_cache_leaves_as_backend(self) -> None:
+        # The CLI must clear every rendered face (including the placeholder)
+        # so Wallet rebuilds the card completely, matching card_assets.CACHE_FILES
+        # used by the app backend.
+        self.assertEqual(sorted(aircard.CACHE_FILES), sorted(card_assets.CACHE_FILES))
 
 
 if __name__ == "__main__":
