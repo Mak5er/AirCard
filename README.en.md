@@ -1,3 +1,5 @@
+> 此檔名為歷史保留；本版本說明統一使用繁體中文，主要入口為 [README.md](README.md)。
+
 # Aircard · XiaoSha
 
 **v1.2.4.114514** · macOS 14+ · Universal（arm64／x86_64）
@@ -140,3 +142,14 @@ chmod +x build.sh
 ## 授權
 
 沿用原專案的 [MIT 授權](LICENSE)，保留原作者著作權與署名。
+
+---
+
+## 支持原作者
+
+如果你覺得 AirCard 實用，可以透過原作者提供的以下管道支持後續開發：
+
+- **PayPal**: [透過 PayPal 贊助](https://www.paypal.com/donate/?hosted_button_id=98QRTC2HFRA4Y)
+- **TON**: `UQBm9KPhtMw-XVVjirUoa09wzrlyWsbeZhKfefl1Uw-qNZ-r`
+- **USDT (TRC20)**: `TDkDMCyjYxgvkWUnQiF5Erk2RyPQMT6G1n`
+- **USDT / BNB (BEP20)**: `0x0954dc491c502849d04956ef74634aa5931a08e8`

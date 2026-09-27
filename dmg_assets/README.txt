@@ -1,41 +1,49 @@
 ============================================================
-              AirCard · Quick Start Guide
+              AirCard · 快速使用說明
 ============================================================
 
-1. INSTALLATION:
-   Drag and drop the "AirCard" icon into the "Applications" folder.
+1. 安裝：
+   將「AirCard」圖示拖到「Applications（應用程式）」資料夾。
+   Universal 版本同時包含 Apple Silicon（arm64）與 Intel（x86_64）。
 
-2. FIRST LAUNCH (macOS Gatekeeper):
-   Since AirCard is built locally, macOS might show a standard security prompt on first launch.
-   
-   Method 1 (Recommended):
-   Right-click (Control-click) on AirCard in Applications -> click "Open" -> click "Open".
-   
-   Method 2 (via Terminal):
+2. 首次開啟：
+   若 macOS 提示無法驗證開發者，可在「應用程式」中按住 Control
+   點擊 AirCard，選擇「開啟」，再依系統提示確認。
+   原專案提供的終端機方式：
    sudo xattr -cr /Applications/AirCard.app
 
-3. ZERO PREREQUISITES:
-   AirCard is 100% self-contained for both Apple Silicon and Intel (x86) Macs.
-   No Homebrew, Python packages, or external tools required!
+   每次開啟 App 都會顯示免責聲明，閱讀後按「我已閱讀並了解，繼續」。
 
-4. HOW TO USE:
-   [Apple Wallet Cards]
-   - Connect your iPhone via USB cable and tap "Trust this Computer".
-   - Open AirCard (the device status badge will turn green).
-   - Click "Scan Cards".
-   - On your iPhone, double-click the Side button, pass Face ID, and tap your card.
-   - Assign a custom skin image (click or drag & drop onto the card).
-   - Click "Flash Skins".
-   - Force-close the Wallet app on your iPhone to see your new designs.
+3. 使用前準備：
+   打包版本內附裝置通訊與圖片處理工具，無需另裝 Homebrew 或 Python 套件。
+   連接並解鎖 iPhone，依提示選擇「信任這部電腦」。
 
-   [Passcode Themes (.passthm)]
-   - Switch to the "Passcode Themes" tab.
-   - Drag & drop a .passthm file (or select one via file picker).
-   - Preview the keypad artwork on the interactive mockup.
-   - Click "Apply Passcode Theme".
-   - Restart your iPhone.
-   * NOTE: Supports all system languages (RU, UK, EN, etc.) and Bold Text!
+4. Wallet 卡片：
+   - 開啟 AirCard，確認顯示裝置已連線。
+   - 按「掃描卡片」。
+   - 在 iPhone 上按兩下側邊按鈕，通過 Face ID 驗證後輕點卡片。
+   - 點擊卡片預覽或拖入圖片，設定自訂外觀。
+   - 選取卡片並按「更新卡片」，保持連線直到操作結束。
+   - 成功後關閉並重新開啟 Wallet，查看新外觀。
+   - 修改文字顏色或顯示末四碼後，需重新啟動 iPhone。
+
+5. 密碼主題（.passthm）：
+   - 切換至「密碼主題」頁面。
+   - 拖入或選取 .passthm 檔案。
+   - 預覽按鍵外觀，確認目標語言與字型樣式。
+   - 按「寫入密碼主題」，完成後重新啟動 iPhone。
+   - 支援多種系統語言與粗體樣式。
+
+6. 異常處理：
+   - 若出現還原失敗，先停止重試，保留紀錄與復原檔，不要任意刪除。
+   - AFC=8 只表示指定檔案不存在，不能單憑此訊息判定卡片資料已遺失。
+   - 確認後端已結束後，若 Wallet 空白，可重新啟動 iPhone，開啟 Wallet
+     等約一分鐘，再從多工畫面關閉並重新開啟。這不保證恢復所有資料。
+   - 紀錄及復原檔可能含敏感資訊，請勿公開上傳完整資料。
+
+完整說明：https://github.com/XiaoSha-0711/AirCard
 
 ============================================================
-Developed by @mak5er & @Lumid-Off
+原作者：@mak5er、@Lumid-Off
+此自訂版本：XiaoSha
 ============================================================
