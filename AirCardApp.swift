@@ -3869,11 +3869,51 @@ struct ContentView: View {
 
 // MARK: - App Entry Point
 
+struct StartupDisclaimerGate: View {
+    @State private var accepted = false
+
+    var body: some View {
+        if accepted {
+            ContentView()
+        } else {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("免責聲明").font(.title.bold())
+                Text("使用 Aircard 前，請閱讀以下說明。")
+                    .foregroundColor(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Aircard 是非官方第三方工具，與 Apple、Apple Wallet、發卡銀行及支付服務提供者沒有隸屬、合作或背書關係。本自訂版本保留原作者署名與 MIT 授權。")
+                        Text("本工具會修改 Wallet 外觀及相關資料庫。即使只是準備或讀取資料，也可能暫時搬移檔案並嘗試還原。連線中斷、系統差異或程式錯誤，可能導致卡片無法顯示、資料遺失或需要重新設定卡片。請事先備份，僅在你擁有或已取得授權的裝置上使用。")
+                        Text("變更外觀、文字顏色或顯示末四碼，不會變更銀行的實際卡號、帳戶、餘額或付款權限。請勿用於冒充、詐欺或其他未經授權的用途。")
+                        Text("修改文字顏色或顯示末四碼後需重新啟動 iPhone。若更新或還原失敗，請停止重試並保留紀錄與復原檔。重新啟動手機或 Wallet 不保證恢復所有資料。")
+                        Text("紀錄與復原檔可能包含裝置、卡片及帳戶敏感資訊，請勿公開上傳完整資料。")
+                        Text("本軟體依 MIT 授權以「現狀」提供，不保證相容性、更新成功或資料恢復。責任限制以原授權及適用法律為準，不排除依法不得排除的責任。")
+                    }
+                    .font(.body)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(.trailing, 8)
+                }
+                Divider()
+                HStack {
+                    Button("離開") { NSApplication.shared.terminate(nil) }
+                        .keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("我已閱讀並了解，繼續") { accepted = true }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(28)
+            .frame(width: 620, height: 560)
+        }
+    }
+}
+
 @main
 struct AirCardApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            StartupDisclaimerGate()
                 .environment(\.locale, Locale(identifier: "zh-Hant-TW"))
         }
         .windowStyle(.hiddenTitleBar)
