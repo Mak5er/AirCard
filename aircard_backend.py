@@ -41,17 +41,29 @@ for lp in lib_paths:
         os.environ["DYLD_LIBRARY_PATH"] = f"{lp}:{cur_dyld}" if cur_dyld else lp
 
 from apply_card_skin import (
+    ExtractionRestoreError,
+    apply_wallet_db_batch_patch,
+    wallet_db_progress,
+    apply_wallet_db_patch,
+    inspect_wallet_db,
+    normalize_primary_account_suffix,
+    prepare_wallet_db_batch_patch,
+    prepare_wallet_db_patch,
+    rollback_wallet_db_patch,
+    validate_card_hash,
+    remove_files,
+    WALLET_DB_UNCHANGED,
     native,
     operation_ok,
     write_file,
     write_files_batch,
-    remove_files,
     build_archive_multi,
     ROOT,
     DEVICE_HELPER,
 )
 from card_assets import CACHE_FILES, build_card_assets
 from aircard import (
+    DeviceDiscoveryError,
     find_device_helper,
     get_connected_device,
     load_saved_cards,
@@ -63,12 +75,16 @@ def cmd_device():
     if not find_device_helper():
         print(json.dumps({"connected": False, "error": "device_helper_missing"}))
         return
-    device = get_connected_device()
+    try:
+        device = get_connected_device(raise_errors=True)
+    except DeviceDiscoveryError as error:
+        print(json.dumps({"connected": False, "error": "device_discovery_failed", "error_message": str(error)}), flush=True)
+        return
     if not device:
         print(json.dumps({"connected": False, "error": "no_device"}))
         return
-    probe = native("probe", device["udid"])
-    device["airlift_compatible"] = operation_ok(probe)
+    # A paired device is connected even when AFC/AirTraffic is not ready yet.
+    # The write path performs its own handshake; detection must not wait for it.
     device["connected"] = True
     print(json.dumps(device))
 
@@ -88,13 +104,13 @@ def cmd_save_cards(cards_json: str):
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return
-    print(json.dumps({"ok": False, "error": "Invalid format"}))
+    print(json.dumps({"ok": False, "error": "格式無效"}))
 
 
 def cmd_prepare_image(src: str, dst: str):
     path = Path(src).expanduser()
     if not path.is_file():
-        print(json.dumps({"ok": False, "error": f"File not found: {src}"}))
+        print(json.dumps({"ok": False, "error": f"找不到檔案：{src}"}))
         return
     try:
         from PIL import Image, ImageOps
@@ -125,10 +141,51 @@ def cmd_prepare_image(src: str, dst: str):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
-def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
+def cmd_flash(udid: str, card_hash: str, image_path: str,
+              foreground_color: str | None = None,
+              primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED) -> bool:
+    prepared = None
+    applied = False
+    try:
+        validate_card_hash(card_hash)
+        artwork = bool(image_path and image_path != "-")
+        database = foreground_color is not None or primary_account_suffix is not WALLET_DB_UNCHANGED
+        if not artwork and not database:
+            raise ValueError("請先設定圖片、文字顏色或顯示末四碼。")
+        if artwork and not Path(image_path).is_file():
+            raise ValueError("找不到圖片檔案")
+        if database:
+            prepared = prepare_wallet_db_patch(udid, card_hash, foreground_color, primary_account_suffix)
+            apply_wallet_db_patch(udid, prepared)
+            applied = True
+        if artwork and not cmd_flash_artwork(udid, card_hash, image_path):
+            raise RuntimeError("卡片圖片或快取更新失敗")
+        result = {"type": "success", "message": "卡片已更新。" + ("請重新啟動 iPhone。" if database else ""),
+                  "step": 1, "total": 1}
+        if prepared:
+            result.update({
+                "originalColors": {"foregroundColor": prepared["originalColors"]["foreground_color"]},
+                "appliedColors": {"foregroundColor": prepared["appliedColors"]["foreground_color"]},
+                "originalPrimaryAccountSuffix": prepared["originalColors"]["primary_account_suffix"],
+                "appliedPrimaryAccountSuffix": prepared["appliedColors"]["primary_account_suffix"],
+            })
+        print(json.dumps(result), flush=True)
+        return True
+    except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError) as error:
+        detail = str(error)
+        if applied:
+            try:
+                rollback_wallet_db_patch(udid, prepared)
+            except Exception as rollback_error:
+                detail += f"; {rollback_error}"
+        print(json.dumps({"type": "error", "message": detail}), flush=True)
+        return False
+
+
+def cmd_flash_artwork(udid: str, card_hash: str, image_path: str) -> bool:
     img_path = Path(image_path)
     if not img_path.is_file():
-        print(json.dumps({"ok": False, "error": "Image file not found"}))
+        print(json.dumps({"ok": False, "error": "找不到圖片檔案"}))
         return False
 
     try:
@@ -137,14 +194,14 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         print(json.dumps({
             "type": "error",
             "card": card_hash,
-            "message": "Failed to prepare card artwork"
+            "message": "卡片圖片準備失敗"
         }))
         sys.stdout.flush()
         return False
 
     pkpass_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
     
-    total_steps = 4
+    total_steps = len(asset_payloads) + 3
     step = 0
     all_ok = True
 
@@ -154,74 +211,258 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         "card": card_hash,
         "step": step,
         "total": total_steps,
-        "message": f"Writing {len(asset_payloads)} artwork files (fast batch)..."
+        "message": f"正在批量寫入 {len(asset_payloads)} 個圖片檔案…"
     }))
     sys.stdout.flush()
 
-    try:
-        ok = write_files_batch(udid, pkpass_dir, asset_payloads)
-    except (OSError, RuntimeError, subprocess.SubprocessError):
-        ok = False
-
-    if not ok:
-        # Fallback to individual writes if batch fails
-        for asset, payload in asset_payloads:
-            try:
-                ok_single = write_file(udid, pkpass_dir, asset, payload)
-            except Exception:
-                ok_single = False
-            if not ok_single:
-                all_ok = False
-
-    # Wallet v2: genuinely unlink rendered faces. Writing corrupt bytes here can
-    # leave the previous artwork resident indefinitely on iOS 27.
-    for ext in [".cache", ".pkcache"]:
-        cache_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}{ext}"
-        step += 1
+    def report(message):
         print(json.dumps({
-            "type": "progress",
-            "card": card_hash,
+            "type": "progress", "card": card_hash,
             "step": step,
-            "total": total_steps,
-            "message": f"Invalidating cache ({ext})..."
-        }))
-        sys.stdout.flush()
-        try:
-            ok_cache = remove_files(udid, cache_dir, list(CACHE_FILES))
-        except Exception:
-            ok_cache = False
-        if not ok_cache:
-            all_ok = False
-            print(json.dumps({
-                "type": "error",
-                "card": card_hash,
-                "step": step,
-                "total": total_steps,
-                "message": f"Could not clear Wallet cache ({ext}); card was not reported as updated."
-            }))
-            sys.stdout.flush()
+            "total": total_steps, "message": message,
+        }), flush=True)
 
-    step += 1
+    def batch_progress(base, label):
+        def callback(event):
+            nonlocal step
+            if event.get("type") == "atc_status":
+                report(event["message"])
+            else:
+                step = max(step, base + event.get("index", 0))
+                report(f"{label}: {event.get('leaf', '')}")
+        return callback
+
+    try:
+        try:
+            ok = write_files_batch(
+                udid, pkpass_dir, asset_payloads,
+                progress_callback=batch_progress(step, "圖片已發送"),
+            )
+        except (ConnectionError, TimeoutError, subprocess.TimeoutExpired):
+            raise
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            ok = False
+
+        if not ok:
+            report("批量寫入失敗，正在逐個檔案重試…")
+            for index, (asset, payload) in enumerate(asset_payloads, 1):
+                report(f"正在單獨寫入 {asset}…")
+                try:
+                    ok_single = write_file(udid, pkpass_dir, asset, payload)
+                except (ConnectionError, TimeoutError, subprocess.TimeoutExpired):
+                    raise
+                except Exception:
+                    ok_single = False
+                all_ok = all_ok and ok_single
+                step = max(step, 1 + index)
+        step = 1 + len(asset_payloads)
+
+        for ext in [".cache", ".pkcache"]:
+            step += 1
+            report(f"正在清理快取（{ext}）…")
+            cache_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}{ext}"
+            all_ok = remove_files(udid, cache_dir, list(CACHE_FILES)) and all_ok
+    except (ConnectionError, TimeoutError, subprocess.TimeoutExpired) as error:
+        print(json.dumps({
+            "type": "error", "card": card_hash,
+            "message": f"裝置操作失敗： {error}",
+        }), flush=True)
+        return False
+
+    step = total_steps
     if not all_ok:
         print(json.dumps({
             "type": "error",
             "card": card_hash,
             "step": step,
             "total": total_steps,
-            "message": f"Failed to update {card_hash[:12]}..."
+            "message": f"更新失敗：{card_hash[:12]}…"
         }))
         sys.stdout.flush()
         return False
 
     print(json.dumps({
-        "type": "success",
+        "type": "progress",
         "card": card_hash,
         "step": step,
         "total": total_steps,
-        "message": f"Successfully updated {card_hash[:12]}..."
+        "message": f"更新成功：{card_hash[:12]}…"
     }))
     sys.stdout.flush()
     return True
+
+
+def emit_db_diagnostic(
+    operation_id: str,
+    phase: str,
+    status: str,
+    started_at: float,
+    error: Exception | None = None,
+) -> None:
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+    root_error = error
+    while root_error is not None and root_error.__cause__ is not None:
+        root_error = root_error.__cause__
+    phase_label = {"prepare": "準備", "apply": "寫入", "rollback": "還原", "transaction": "交易"}.get(phase, phase)
+    status_label = {"started": "開始", "completed": "完成", "failed": "失敗"}.get(status, status)
+    if error is None:
+        message = (
+            f"資料庫 [{operation_id}] {phase_label}：{status_label} "
+            f"（{elapsed_ms} 毫秒）"
+        )
+    else:
+        message = (
+            f"資料庫 [{operation_id}] {phase_label}：{status_label} "
+            f"（{elapsed_ms} 毫秒）：{type(root_error).__name__}: {error}"
+        )
+    payload = {
+        "type": "diagnostic",
+        "operationId": operation_id,
+        "phase": phase,
+        "status": status,
+        "elapsedMs": elapsed_ms,
+        "message": message,
+    }
+    if error is not None:
+        payload["errorType"] = type(root_error).__name__
+    print(json.dumps(payload))
+    sys.stdout.flush()
+
+
+def emit_recovery_guidance(error: Exception) -> None:
+    current = error
+    while current is not None:
+        if isinstance(current, ExtractionRestoreError):
+            for message in (
+                "處理建議：本次更新未確認成功，請先停止重試，保留完整紀錄及 Media/airlift-recovered-* 復原檔；不要手動刪除或覆寫。",
+                "AFC=8／file_not_found 表示本輪未找到指定的復原檔，不能據此判定原位置資料庫或卡片資料已遺失。",
+                "確認後端已結束後，若 Wallet 空白，可先重新啟動 iPhone，開啟 Wallet 等約一分鐘，再從多工畫面關閉 Wallet 並重新開啟。此方法不保證解決資料庫還原失敗。",
+                "若卡片仍未恢復，請保留現況與紀錄供排查；復原檔可能包含敏感資料，請勿公開上傳。詳見「使用說明與疑難排解.md」。",
+            ):
+                print(json.dumps({"type": "diagnostic", "message": message}), flush=True)
+            return
+        current = current.__cause__
+
+
+
+def cmd_inspect_wallet_db(udid: str, card_hash: str) -> bool:
+    try:
+        result = inspect_wallet_db(udid, card_hash)
+        print(json.dumps({"ok": True, **result}))
+        return True
+    except Exception as error:
+        print(json.dumps({"ok": False, "error": str(error)}))
+        return False
+
+
+
+def cmd_flash_wallet_db_batch(udid: str, updates_path: str) -> bool:
+    operation_id = os.urandom(4).hex()
+    phase = "prepare"
+    phase_started_at = time.monotonic()
+    transaction_started_at = phase_started_at
+    def report_progress(step, message):
+        payload = {
+            "type": "progress", "message": message,
+            "elapsedMs": round((time.monotonic() - transaction_started_at) * 1000),
+        }
+        if step is not None:
+            payload.update(step=step, total=14)
+        print(json.dumps(payload), flush=True)
+
+    try:
+        raw = Path(updates_path).read_bytes()
+        if not raw or len(raw) > 1024 * 1024:
+            raise ValueError("Wallet 資料庫更新檔為空或過大")
+        updates = json.loads(raw)
+        if not isinstance(updates, list) or not updates:
+            raise ValueError("Wallet 資料庫更新檔必須包含清單")
+
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "started",
+            phase_started_at,
+        )
+        report_progress(0, "正在準備 Wallet 資料庫更新…")
+        with wallet_db_progress(report_progress):
+            prepared = prepare_wallet_db_batch_patch(udid, updates)
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "completed",
+            phase_started_at,
+        )
+
+        phase = "apply"
+        phase_started_at = time.monotonic()
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "started",
+            phase_started_at,
+        )
+        report_progress(4, "正在比對寫入前的 Wallet 資料庫…")
+        with wallet_db_progress(report_progress):
+            apply_wallet_db_batch_patch(udid, prepared)
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "completed",
+            phase_started_at,
+        )
+        emit_db_diagnostic(
+            operation_id,
+            "transaction",
+            "completed",
+            transaction_started_at,
+        )
+
+        cards = [{
+            "requestIndex": card.get("requestIndex"),
+            "originalColors": {
+                "foregroundColor": card["originalColors"]["foreground_color"],
+            },
+            "appliedColors": {
+                "foregroundColor": card["appliedColors"]["foreground_color"],
+            },
+            "originalPrimaryAccountSuffix": card["originalColors"][
+                "primary_account_suffix"
+            ],
+            "appliedPrimaryAccountSuffix": card["appliedColors"][
+                "primary_account_suffix"
+            ],
+        } for card in prepared["cards"]]
+        print(json.dumps({
+            "type": "success",
+            "step": 14,
+            "total": 14,
+            "message": (
+                f"已一次更新 {len(cards)} 張卡片的 Wallet 資料庫。"
+                "請重新啟動 iPhone 以套用變更。"
+            ),
+            "cards": cards,
+        }))
+        sys.stdout.flush()
+        return True
+    except (
+        json.JSONDecodeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as error:
+        emit_db_diagnostic(
+            operation_id,
+            phase,
+            "failed",
+            phase_started_at,
+            error,
+        )
+        emit_recovery_guidance(error)
+        return False
+
 
 
 KEYPAD_SUBTEXTS = {
@@ -275,7 +516,7 @@ def parse_passthm_archive(
 ) -> list[tuple[str, str, bytes]]:
     path = Path(passthm_path).expanduser()
     if not path.is_file():
-        raise FileNotFoundError(f"Passcode theme file not found: {passthm_path}")
+        raise FileNotFoundError(f"找不到密碼主題檔案: {passthm_path}")
 
     with zipfile.ZipFile(path, "r") as z:
         image_entries = [
@@ -386,7 +627,7 @@ def parse_passthm_archive(
 def cmd_inspect_passthm(passthm_path: str):
     path = Path(passthm_path).expanduser()
     if not path.is_file():
-        print(json.dumps({"ok": False, "error": f"File not found: {passthm_path}"}))
+        print(json.dumps({"ok": False, "error": f"找不到檔案：{passthm_path}"}))
         return
     try:
         detected_ver = "TelephonyUI-10"
@@ -402,7 +643,7 @@ def cmd_inspect_passthm(passthm_path: str):
 
         items = parse_passthm_archive(str(path), detected_ver)
         if not items:
-            print(json.dumps({"ok": False, "error": "No image assets found in archive"}))
+            print(json.dumps({"ok": False, "error": "壓縮檔中沒有圖片素材"}))
             return
 
         keys_preview = {}
@@ -438,13 +679,13 @@ def cmd_flash_passthm(
 ) -> bool:
     path = Path(passthm_path).expanduser()
     if not path.is_file():
-        print(json.dumps({"ok": False, "error": "Passcode theme file not found"}))
+        print(json.dumps({"ok": False, "error": "找不到密碼主題檔案"}))
         return False
 
     try:
         items_to_write = parse_passthm_archive(str(path), telephony_ver, target_lang, target_bold)
         if not items_to_write:
-            print(json.dumps({"ok": False, "error": "No image assets found in archive"}))
+            print(json.dumps({"ok": False, "error": "壓縮檔中沒有圖片素材"}))
             return False
 
         # Group items by target directory (e.g. /var/mobile/Library/Caches/TelephonyUI-10)
@@ -472,7 +713,7 @@ def cmd_flash_passthm(
             "type": "progress",
             "step": 0,
             "total": total_steps,
-            "message": f"Flashing passcode theme '{path.stem}' ({total_steps} assets)..."
+            "message": f"正在寫入密碼主題“{path.stem}”（{total_steps} 個資源）…"
         }))
         sys.stdout.flush()
 
@@ -482,6 +723,9 @@ def cmd_flash_passthm(
 
             def make_progress_handler(base: int):
                 def on_atc_progress(p: dict):
+                    if p.get("type") == "atc_status":
+                        print(json.dumps({"type": "progress", "message": p["message"]}), flush=True)
+                        return
                     idx = p.get("index", 0)
                     leaf = p.get("leaf", "")
                     curr = min(base + idx, total_steps)
@@ -490,7 +734,7 @@ def cmd_flash_passthm(
                         "step": curr,
                         "total": total_steps,
                         "leaf": leaf,
-                        "message": f"Writing {leaf} ({curr}/{total_steps})..."
+                        "message": p.get("message") or f"正在寫入 {leaf}（{curr}/{total_steps}）…"
                     }))
                     sys.stdout.flush()
                 return on_atc_progress
@@ -499,7 +743,7 @@ def cmd_flash_passthm(
                 "type": "progress",
                 "step": base_step,
                 "total": total_steps,
-                "message": f"Flashing {len(dir_files)} asset(s) into {tdir_name}..."
+                "message": f"正在向 {tdir_name} 寫入 {len(dir_files)} 個資源…"
             }))
             sys.stdout.flush()
 
@@ -515,7 +759,7 @@ def cmd_flash_passthm(
                 # If batch failed, fallback to file-by-file write for this directory
                 print(json.dumps({
                     "type": "warning",
-                    "message": f"Batch write notice for {tdir_name}, falling back to file-by-file write..."
+                    "message": f"{tdir_name} 批量寫入失敗，正在逐個檔案寫入…"
                 }))
                 sys.stdout.flush()
 
@@ -527,7 +771,7 @@ def cmd_flash_passthm(
                         "step": curr,
                         "total": total_steps,
                         "leaf": leaf,
-                        "message": f"[Fallback] Writing {leaf} ({curr}/{total_steps})..."
+                        "message": f"[逐個重試] 正在寫入 {leaf}（{curr}/{total_steps}）…"
                     }))
                     sys.stdout.flush()
 
@@ -539,7 +783,7 @@ def cmd_flash_passthm(
                 if failed_leaves:
                     print(json.dumps({
                         "type": "error",
-                        "message": f"Could not write {len(failed_leaves)} file(s) in {tdir_name}: {', '.join(failed_leaves[:5])}"
+                        "message": f"{tdir_name} 中有 {len(failed_leaves)} 個檔案寫入失敗： {', '.join(failed_leaves[:5])}"
                     }))
                     sys.stdout.flush()
                     return False
@@ -550,7 +794,7 @@ def cmd_flash_passthm(
             "type": "success",
             "step": total_steps,
             "total": total_steps,
-            "message": f"Passcode theme '{path.stem}' successfully applied! Lock your iPhone to check."
+            "message": f"密碼主題“{path.stem}”已成功應用！請鎖定 iPhone 查看。"
         }))
         sys.stdout.flush()
         return True
@@ -562,7 +806,7 @@ def cmd_flash_passthm(
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "No command provided"}))
+        print(json.dumps({"error": "未提供指令"}))
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -575,8 +819,35 @@ def main():
         cmd_save_cards(sys.argv[2])
     elif norm_cmd == "prepare-image" and len(sys.argv) > 3:
         cmd_prepare_image(sys.argv[2], sys.argv[3])
+    elif norm_cmd == "inspect-wallet-db" and len(sys.argv) == 4:
+        if not cmd_inspect_wallet_db(sys.argv[2], sys.argv[3]):
+            sys.exit(1)
+    elif norm_cmd == "flash-wallet-db-batch" and len(sys.argv) == 4:
+        if not cmd_flash_wallet_db_batch(sys.argv[2], sys.argv[3]):
+            sys.exit(1)
     elif norm_cmd == "flash" and len(sys.argv) > 4:
-        if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4]):
+        foreground_color = None
+        primary_account_suffix: str | None | object = WALLET_DB_UNCHANGED
+        index = 5
+        while index < len(sys.argv):
+            if index + 1 >= len(sys.argv):
+                print(json.dumps({"error": f"缺少參數值：{sys.argv[index]}"}))
+                sys.exit(1)
+            if sys.argv[index] == "--foreground-color":
+                foreground_color = sys.argv[index + 1]
+            elif sys.argv[index] == "--primary-account-suffix":
+                primary_account_suffix = sys.argv[index + 1]
+            else:
+                print(json.dumps({"error": f"未知寫入選項：{sys.argv[index]}"}))
+                sys.exit(1)
+            index += 2
+        if not cmd_flash(
+            sys.argv[2],
+            sys.argv[3],
+            sys.argv[4],
+            foreground_color,
+            primary_account_suffix,
+        ):
             sys.exit(1)
     elif norm_cmd == "inspect-passthm" and len(sys.argv) > 2:
         cmd_inspect_passthm(sys.argv[2])
@@ -587,7 +858,7 @@ def main():
         if not cmd_flash_passthm(sys.argv[2], sys.argv[3], t_ver, t_lang, t_bold):
             sys.exit(1)
     else:
-        print(json.dumps({"error": f"Unknown command: {cmd}"}))
+        print(json.dumps({"error": f"未知指令：{cmd}"}))
         sys.exit(1)
 
 

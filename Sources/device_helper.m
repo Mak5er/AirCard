@@ -1,11 +1,13 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <Foundation/Foundation.h>
 #include <signal.h>
+#include <pthread.h>
+#include <dlfcn.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #import "airlift_target.h"
-#import "os_trace.h"
 
 typedef const void *AMDeviceRef;
 typedef const void *AMDeviceNotificationRef;
@@ -50,8 +52,6 @@ extern int AMDServiceConnectionInvalidate(AMDServiceConnectionRef connection);
 extern int AMDServiceConnectionSend(AMDServiceConnectionRef connection,
                                     const void *bytes,
                                     size_t length);
-extern long AMDServiceConnectionReceive(AMDServiceConnectionRef connection,
-                                        void *bytes, long length);
 extern int AMDServiceConnectionSendMessage(AMDServiceConnectionRef connection,
                                            CFTypeRef message,
                                            CFPropertyListFormat format);
@@ -116,6 +116,8 @@ static const char *TrackedBooksDirectories[] = {
 
 static CFStringRef TargetIdentifier;
 static AMDeviceRef TargetDevice;
+static pthread_mutex_t TargetLock = PTHREAD_MUTEX_INITIALIZER;
+static BOOL TargetDiscoveryActive;
 
 typedef struct {
     AMDeviceRef device;
@@ -134,13 +136,17 @@ typedef struct {
 static void DeviceCallback(AMDeviceNotificationCallbackInfo *info,
                            void *context) {
     (void)context;
-    if (!info || !info->device || info->message != 1 || TargetDevice) return;
+    if (!info || !info->device || info->message != 1) return;
+    pthread_mutex_lock(&TargetLock);
+    if (!TargetDiscoveryActive || !TargetIdentifier || TargetDevice) {
+        pthread_mutex_unlock(&TargetLock);
+        return;
+    }
     CFStringRef identifier = AMDeviceCopyDeviceIdentifier(info->device);
     BOOL matches = identifier && CFEqual(identifier, TargetIdentifier);
     if (identifier) CFRelease(identifier);
-    if (!matches) return;
-    TargetDevice = CFRetain(info->device);
-    CFRunLoopStop(CFRunLoopGetMain());
+    if (matches) TargetDevice = CFRetain(info->device);
+    pthread_mutex_unlock(&TargetLock);
 }
 
 static NSDictionary *SubscriptionOptions(BOOL directConnectionsOnly) {
@@ -156,6 +162,9 @@ static NSDictionary *SubscriptionOptions(BOOL directConnectionsOnly) {
 
 static int FindTarget(void) {
     AMDeviceNotificationRef subscription = NULL;
+    pthread_mutex_lock(&TargetLock);
+    TargetDiscoveryActive = YES;
+    pthread_mutex_unlock(&TargetLock);
     int status = AMDeviceNotificationSubscribeWithOptions(
         DeviceCallback,
         0,
@@ -163,8 +172,21 @@ static int FindTarget(void) {
         NULL,
         &subscription,
         (__bridge CFDictionaryRef)SubscriptionOptions(NO));
-    if (status == 0)
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 30.0, false);
+    if (status == 0) {
+        CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 30.0;
+        while (CFAbsoluteTimeGetCurrent() < deadline) {
+            pthread_mutex_lock(&TargetLock);
+            BOOL found = TargetDevice != NULL;
+            pthread_mutex_unlock(&TargetLock);
+            if (found) break;
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+        }
+    }
+    // Unsubscribe need not drain callbacks already queued by MobileDevice.
+    // Close the gate under the same lock before teardown releases any state.
+    pthread_mutex_lock(&TargetLock);
+    TargetDiscoveryActive = NO;
+    pthread_mutex_unlock(&TargetLock);
     if (subscription) AMDeviceNotificationUnsubscribe(subscription);
     return status;
 }
@@ -206,19 +228,17 @@ static void EnumerateCallback(AMDeviceNotificationCallbackInfo *info,
                 entry[field] =
                     [value isKindOfClass:NSString.class] ? value : @"";
             }
-            id language = CFBridgingRelease(AMDeviceCopyValue(
-                info->device, CFSTR("com.apple.international"), CFSTR("Language")));
-            entry[@"language"] = [language isKindOfClass:NSString.class] ? language : @"en";
-
-            id locale = CFBridgingRelease(AMDeviceCopyValue(
-                info->device, CFSTR("com.apple.international"), CFSTR("Locale")));
-            entry[@"locale"] = [locale isKindOfClass:NSString.class] ? locale : @"";
-
-            id boldText = CFBridgingRelease(AMDeviceCopyValue(
-                info->device, CFSTR("com.apple.Accessibility"), CFSTR("EnhancedTextLegibility")));
-            if (boldText) {
-                entry[@"bold_text"] = @([boldText boolValue]);
+            NSDictionary *localeKeys = @{@"language": @"Language", @"locale": @"Locale"};
+            for (NSString *field in localeKeys) {
+                id value = CFBridgingRelease(AMDeviceCopyValue(info->device,
+                    CFSTR("com.apple.international"), (__bridge CFStringRef)localeKeys[field]));
+                if ([value isKindOfClass:NSString.class]) entry[field] = value;
             }
+            id bold = CFBridgingRelease(AMDeviceCopyValue(info->device,
+                CFSTR("com.apple.Accessibility"), CFSTR("EnhancedTextLegibility")));
+            if ([bold isKindOfClass:NSNumber.class]) entry[@"bold_text"] = [bold boolValue] ? @YES : @NO;
+            int (*interfaceType)(AMDeviceRef) = dlsym(RTLD_DEFAULT, "AMDeviceGetInterfaceType");
+            if (interfaceType) entry[@"usb"] = @(interfaceType(info->device) == 1);
             AMDeviceStopSession(info->device);
         }
         AMDeviceDisconnect(info->device);
@@ -239,6 +259,7 @@ static int ListDevices(void) {
     if (status == 0)
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, false);
     if (subscription) AMDeviceNotificationUnsubscribe(subscription);
+    if (status != 0) fprintf(stderr, "MobileDevice 裝置探索訂閱失敗（%d）\n", status);
     NSData *data = [NSJSONSerialization dataWithJSONObject:DiscoveredDevices
                                                    options:0
                                                      error:nil];
@@ -249,89 +270,39 @@ static int ListDevices(void) {
     return status == 0 ? 0 : 2;
 }
 
-static int StreamDeviceLogs(AMDServiceConnectionRef connection) {
-    // syslog_relay omits the Info/Debug resource lookups containing Wallet card
-    // identifiers on iOS 18. Request the unified activity stream instead.
-    NSDictionary *request = @{
-        @"Request": @"StartActivity",
-        @"Pid": @(UINT32_MAX),
-        @"MessageFilter": @0xFFFF,
-        @"StreamFlags": @0x3C, // Payload, historical, callstack and debug events.
-    };
-    if (AMDServiceConnectionSendMessage(connection,
-            (__bridge CFDictionaryRef)request, kCFPropertyListBinaryFormat_v1_0) != 0) {
-        fprintf(stderr, "AirCard scanner: Could not request device log streaming.\n");
-        return 2;
-    }
-
-    uint8_t type = 0;
-    NSString *error = nil;
-    NSData *reply = AirCardTraceReadFrame(AMDServiceConnectionReceive, connection,
-                                         &type, &error);
-    id status = reply && type == 1
-        ? [NSPropertyListSerialization propertyListWithData:reply
-              options:NSPropertyListImmutable format:NULL error:NULL] : nil;
-    if (![status isKindOfClass:NSDictionary.class] ||
-        ![status[@"Status"] isEqual:@"RequestSuccessful"]) {
-        fprintf(stderr, "AirCard scanner: %s\n",
-                (error ?: @"The device refused to start log streaming.").UTF8String);
-        return 2;
-    }
-
-    fprintf(stderr, "AirCard scanner: Connected to the unified device log stream.\n");
-    while (YES) {
-        @autoreleasepool {
-            NSData *record = AirCardTraceReadFrame(AMDServiceConnectionReceive,
-                                                   connection, &type, &error);
-            if (!record) {
-                fprintf(stderr, "AirCard scanner: %s\n", error.UTF8String);
-                return 2;
-            }
-            if (type != 2) continue;
-            NSString *line = AirCardTraceLogLine(record);
-            if (line) {
-                NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-                if (fwrite(data.bytes, 1, data.length, stdout) != data.length ||
-                    fflush(stdout) != 0) return 2;
-            }
-        }
-    }
-}
-
 static int RunSyslog(void) {
-    if (FindTarget() != 0 || !TargetDevice) {
-        fprintf(stderr, "AirCard scanner: iPhone not found. Reconnect it via USB.\n");
-        return 2;
-    }
+    if (FindTarget() != 0 || !TargetDevice) return 2;
     AMDeviceRef device = TargetDevice;
-    if (AMDeviceConnect(device) != 0) {
-        fprintf(stderr, "AirCard scanner: Could not connect to the iPhone.\n");
-        return 2;
-    }
+    if (AMDeviceConnect(device) != 0) return 2;
     if (!AMDeviceIsPaired(device)) AMDevicePair(device);
     if (AMDeviceValidatePairing(device) != 0 || AMDeviceStartSession(device) != 0) {
-        fprintf(stderr, "AirCard scanner: Unlock the iPhone and trust this Mac, then retry.\n");
         AMDeviceDisconnect(device);
         return 2;
     }
 
     AMDServiceConnectionRef connection = NULL;
     if (AMDeviceSecureStartService(
-            device, CFSTR("com.apple.os_trace_relay"), NULL, &connection) != 0 ||
+            device, CFSTR("com.apple.syslog_relay"), NULL, &connection) != 0 ||
         !connection) {
-        fprintf(stderr, "AirCard scanner: Could not open the device log service. Unlock the iPhone and retry.\n");
         AMDeviceStopSession(device);
         AMDeviceDisconnect(device);
         return 2;
     }
 
     signal(SIGPIPE, SIG_IGN);
-    int status = StreamDeviceLogs(connection);
+    int sock = AMDServiceConnectionGetSocket(connection);
+    char buffer[65536];
+    while (sock >= 0) {
+        ssize_t received = recv(sock, buffer, sizeof(buffer), 0);
+        if (received <= 0) break;
+        fwrite(buffer, 1, (size_t)received, stdout);
+        fflush(stdout);
+    }
 
     AMDServiceConnectionInvalidate(connection);
     AMDeviceStopSession(device);
     AMDeviceDisconnect(device);
-    return status;
+    return 0;
 }
 
 static void OpenSession(DeviceSession *session) {
@@ -396,11 +367,19 @@ static void PrintJSON(NSDictionary *object) {
     fwrite("\n", 1, 1, stdout);
 }
 
-static BOOL AFCExists(AFCConnectionRef afc, NSString *path) {
+// AFC wire error 8 is AFC_E_OBJECT_NOT_FOUND; permission/transport errors differ.
+// https://github.com/libimobiledevice/libimobiledevice/blob/master/include/libimobiledevice/afc.h
+static const int AFCObjectNotFound = 8;
+
+static int AFCStatStatus(AFCConnectionRef afc, NSString *path) {
     AFCKeyValueRef info = NULL;
     int status = AFCFileInfoOpen(afc, path.fileSystemRepresentation, &info);
     if (info) AFCKeyValueClose(info);
-    return status == 0;
+    return status;
+}
+
+static BOOL AFCExists(AFCConnectionRef afc, NSString *path) {
+    return AFCStatStatus(afc, path) == 0;
 }
 
 static long long AFCFileSize(AFCConnectionRef afc, NSString *path) {
@@ -840,14 +819,21 @@ static BOOL TargetGate(NSDictionary *summary, BOOL *tested) {
     return YES;
 }
 
-static BOOL SendAll(AMDServiceConnectionRef service, NSData *data) {
+static BOOL SendAll(AMDServiceConnectionRef service, NSData *data,
+                    size_t *bytesSent, int *sendResult, int *sendErrno) {
     const uint8_t *cursor = data.bytes;
     size_t remaining = data.length;
     while (remaining) {
-        int sent = AMDServiceConnectionSend(service, cursor, remaining);
-        if (sent <= 0) return NO;
+        // Bound each send instead of passing a multi-megabyte archive at once.
+        size_t chunk = MIN(remaining, (size_t)65536);
+        errno = 0;
+        int sent = AMDServiceConnectionSend(service, cursor, chunk);
+        *sendResult = sent;
+        *sendErrno = errno;
+        if (sent <= 0 || (size_t)sent > chunk) return NO;
         cursor += sent;
         remaining -= (size_t)sent;
+        *bytesSent += (size_t)sent;
     }
     return YES;
 }
@@ -885,13 +871,20 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
     int messageStatus = -1;
     int responseStatus = -1;
     BOOL archiveSent = NO;
+    size_t archiveBytesSent = 0;
+    int archiveSendResult = 0;
+    int archiveSendErrno = 0;
     CFTypeRef response = NULL;
     if (serviceStatus == 0 && zipService) {
+        int socket = AMDServiceConnectionGetSocket(zipService);
+        struct timeval timeout = { .tv_sec = 30, .tv_usec = 0 };
+        setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         messageStatus = AMDServiceConnectionSendMessage(
             zipService,
             (__bridge CFTypeRef)@{ @"MediaSubdir": source },
             kCFPropertyListBinaryFormat_v1_0);
-        if (messageStatus == 0) archiveSent = SendAll(zipService, archive);
+        if (messageStatus == 0) archiveSent = SendAll(zipService, archive,
+            &archiveBytesSent, &archiveSendResult, &archiveSendErrno);
         if (archiveSent) {
             int socket = AMDServiceConnectionGetSocket(zipService);
             struct timeval timeout = { .tv_sec = 30, .tv_usec = 0 };
@@ -929,6 +922,10 @@ static NSDictionary *Stage(DeviceSession *session, NSArray<NSString *> *args) {
               @"zipMessageStatus": @(messageStatus),
               @"zipResponseStatus": @(responseStatus),
               @"archiveSent": @(archiveSent),
+              @"archiveBytes": @(archive.length),
+              @"archiveBytesSent": @(archiveBytesSent),
+              @"archiveSendResult": @(archiveSendResult),
+              @"archiveSendErrno": @(archiveSendErrno),
               @"sourceObjectsPresent": @(sourceObjects),
               @"booksWritten": @(booksWritten) };
 }
@@ -1003,16 +1000,18 @@ static NSDictionary *Finish(DeviceSession *session, NSArray<NSString *> *args) {
               @"booksRestore": booksRestore };
 }
 
-static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *args) {
+static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *args, BOOL preserveRecovered) {
     NSString *source = args[0];
     NSString *linkDestination = args[1];
     NSString *recovered = args[2];
     NSString *snapshotRoot = args[3];
+    if (!GeneratedNamesMatch(source, linkDestination, recovered) || !LoadBooksSnapshot(snapshotRoot))
+        return @{ @"ok": @NO, @"reason": @"清理參數無效" };
     NSMutableArray<NSString *> *failures = NSMutableArray.array;
 
     if (!RemoveIfPresent(session->afc, linkDestination))
         [failures addObject:@"relocated link"];
-    if (!RemoveIfPresent(session->afc, recovered))
+    if (!preserveRecovered && !RemoveIfPresent(session->afc, recovered))
         [failures addObject:@"recovered file"];
     if (!RemoveGeneratedTree(session->afc, source, 0))
         [failures addObject:@"StreamingZip tree"];
@@ -1023,53 +1022,52 @@ static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *ar
 
     BOOL sourceAbsent = !AFCExists(session->afc, source);
     BOOL linkAbsent = !AFCExists(session->afc, linkDestination);
-    BOOL recoveredAbsent = !AFCExists(session->afc, recovered);
-    BOOL cleanupComplete = failures.count == 0 && sourceAbsent && linkAbsent && recoveredAbsent && booksRestored;
+    int recoveredStatus = AFCStatStatus(session->afc, recovered);
+    BOOL recoveredAbsent = recoveredStatus == AFCObjectNotFound;
+    BOOL cleanupComplete = failures.count == 0 && sourceAbsent && linkAbsent && ((preserveRecovered && recoveredStatus == 0) || recoveredAbsent) && booksRestored;
     return @{ @"ok": @(cleanupComplete),
               @"cleanupComplete": @(cleanupComplete),
               @"failures": failures,
               @"sourceAbsent": @(sourceAbsent),
               @"linkAbsent": @(linkAbsent),
               @"recoveredAbsent": @(recoveredAbsent),
+              @"recoveredStatStatus": @(recoveredStatus),
               @"booksPreimageRestored": @(booksRestored),
               @"booksRestore": booksRestore };
 }
 
-static NSDictionary *FinishMovedRemoval(DeviceSession *session, NSArray<NSString *> *args) {
-    NSString *source = args[0];
-    NSString *linkDestination = args[1];
-    NSString *recovered = args[2];
-    NSString *snapshotRoot = args[3];
-    NSInteger expectedCount = [args[4] integerValue];
-    BOOL safeArguments = GeneratedNamesMatch(source, linkDestination, recovered) &&
-        expectedCount > 0 && expectedCount <= 32;
-    if (!safeArguments) return @{ @"ok": @NO, @"safeArguments": @NO };
-
-    NSMutableArray<NSString *> *missing = NSMutableArray.array;
-    for (NSInteger index = 0; index < expectedCount; index++) {
-        NSString *path = [source stringByAppendingPathComponent:
-            [NSString stringWithFormat:@"removed-%ld", (long)index]];
-        if (!AFCExists(session->afc, path)) [missing addObject:path];
+// Extraction is restricted to generated recovery files and known Wallet assets.
+static NSDictionary *ExtractFile(DeviceSession *session, NSString *recovered,
+                                  NSString *leaf, NSString *output) {
+    NSDictionary *limits = @{
+        @"passes23.sqlite": @(128 * 1024 * 1024),
+        @"passes23.sqlite-journal": @(128 * 1024 * 1024),
+        @"passes23.sqlite-wal": @(128 * 1024 * 1024),
+        @"passes23.sqlite-shm": @(8 * 1024 * 1024),
+        @"cardBackgroundCombined@3x.png": @(16 * 1024 * 1024),
+        @"cardBackgroundCombined@2x.png": @(16 * 1024 * 1024),
+        @"cardBackgroundCombined.pdf": @(16 * 1024 * 1024),
+    };
+    if (!GeneratedToken(recovered, AIRLIFT_RECOVERED_PREFIX) || !limits[leaf] || !output.isAbsolutePath)
+        return @{ @"ok": @NO, @"reasonCode": @"invalid_arguments", @"reason": @"不支援的擷取參數" };
+    int statStatus = AFCStatStatus(session->afc, recovered);
+    // Asset dispatch and AFC visibility can be separated by a short delay.
+    for (NSUInteger attempt = 0; statStatus == AFCObjectNotFound && attempt < 4; attempt++) {
+        usleep(250000);
+        statStatus = AFCStatStatus(session->afc, recovered);
     }
-    NSMutableArray<NSString *> *failures = NSMutableArray.array;
-    if (!RemoveIfPresent(session->afc, linkDestination)) [failures addObject:@"relocated link"];
-    if (!RemoveIfPresent(session->afc, recovered)) [failures addObject:@"recovered file"];
-    if (!RemoveGeneratedTree(session->afc, source, 0)) [failures addObject:@"StreamingZip tree"];
-    NSDictionary *booksRestore = RestoreBooksState(session->afc, snapshotRoot);
-    if (![booksRestore[@"ok"] boolValue]) [failures addObject:@"Books preimage"];
-    BOOL cleanupComplete = failures.count == 0;
-    // A missing source is already an invalidated cache entry. Report success
-    // when cleanup and Books restoration succeed, while exposing how many
-    // entries were actually moved for diagnostics.
-    return @{ @"ok": @(cleanupComplete),
-              @"safeArguments": @YES,
-              @"movedCount": @(expectedCount - missing.count),
-              @"alreadyAbsentCount": @(missing.count),
-              @"allTargetsMoved": @(missing.count == 0),
-              @"missing": missing,
-              @"cleanupComplete": @(cleanupComplete),
-              @"failures": failures,
-              @"booksRestore": booksRestore };
+    if (statStatus != 0)
+        return @{ @"ok": @NO, @"afcStatus": @(statStatus),
+                  @"reasonCode": statStatus == AFCObjectNotFound ? @"file_not_found" : @"afc_stat_failed",
+                  @"reason": statStatus == AFCObjectNotFound ? @"找不到檔案" : @"無法查詢復原檔案狀態" };
+    if (![AFCFileKind(session->afc, recovered) isEqual:@"S_IFREG"])
+        return @{ @"ok": @NO, @"reasonCode": @"not_regular_file", @"reason": @"復原路徑不是一般檔案" };
+    NSData *data = AFCReadFileWithLimit(session->afc, recovered, [limits[leaf] longLongValue]);
+    NSError *error = nil;
+    BOOL ok = data && [data writeToFile:output options:NSDataWritingAtomic error:&error];
+    return @{ @"ok": @(ok), @"length": @(data.length),
+              @"reasonCode": ok ? @"" : @"read_or_export_failed",
+              @"reason": ok ? @"" : (error.localizedDescription ?: @"讀取失敗或檔案大小超過限制") };
 }
 
 int main(int argc, const char *argv[]) {
@@ -1143,35 +1141,22 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[9]],
                     [NSString stringWithUTF8String:argv[10]],
                 ]);
-            } else if ([command isEqual:@"finish-write"] && argc == 7) {
+            } else if ([command isEqual:@"discard-extracted"] && argc == 4) {
+                NSString *recovered = [NSString stringWithUTF8String:argv[3]];
+                BOOL valid = GeneratedToken(recovered, AIRLIFT_RECOVERED_PREFIX) != nil;
+                operation = @{ @"ok": @(valid && RemoveIfPresent(session.afc, recovered)) };
+            } else if ([command isEqual:@"extract"] && argc == 6) {
+                operation = ExtractFile(&session,
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]]);
+            } else if (([command isEqual:@"finish-write"] || [command isEqual:@"finish-extract"]) && argc == 7) {
                 operation = FinishWrite(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
                     [NSString stringWithUTF8String:argv[4]],
                     [NSString stringWithUTF8String:argv[5]],
                     [NSString stringWithUTF8String:argv[6]],
-                ]);
-            } else if ([command isEqual:@"finish-moved-removal"] && argc == 8) {
-                operation = FinishMovedRemoval(&session, @[
-                    [NSString stringWithUTF8String:argv[3]],
-                    [NSString stringWithUTF8String:argv[4]],
-                    [NSString stringWithUTF8String:argv[5]],
-                    [NSString stringWithUTF8String:argv[6]],
-                    [NSString stringWithUTF8String:argv[7]],
-                ]);
-            } else if ([command isEqual:@"afc-read"] && argc == 5) {
-                NSString *mediaPath = [NSString stringWithUTF8String:argv[3]];
-                NSString *localOut = [NSString stringWithUTF8String:argv[4]];
-                if (!IsSafeRelativePath(mediaPath)) {
-                    operation = @{ @"ok": @NO, @"error": @"unsafe media path" };
-                } else {
-                    NSData *data = AFCReadFileWithLimit(
-                        session.afc, mediaPath, 32 * 1024 * 1024);
-                    BOOL wrote = data &&
-                        [data writeToFile:localOut options:NSDataWritingAtomic error:nil];
-                    operation = @{ @"ok": @(wrote),
-                                   @"size": @(data.length),
-                                   @"path": mediaPath };
-                }
+                ], [command isEqual:@"finish-extract"]);
             }
         }
 

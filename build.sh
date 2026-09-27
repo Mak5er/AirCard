@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "==> [1/6] Building universal helper binaries (device_helper & airtraffic_host)..."
-make clean
 make all
 
 APP_NAME="AirCard"
@@ -27,7 +26,9 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
+    <string>zh_TW</string>
+    <key>CFBundleLocalizations</key>
+    <array><string>zh_TW</string></array>
     <key>CFBundleExecutable</key>
     <string>AirCard</string>
     <key>CFBundleIdentifier</key>
@@ -37,7 +38,7 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
     <key>CFBundleName</key>
     <string>AirCard</string>
     <key>CFBundleDisplayName</key>
-    <string>AirCard</string>
+    <string>Aircard</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -45,9 +46,9 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
     <key>CFBundleShortVersionString</key>
     <string>1.2.4</string>
     <key>CFBundleVersion</key>
-    <string>7</string>
+    <string>114514</string>
     <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
+    <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -67,16 +68,18 @@ fi
 # directly, so the bundle needs no libimobiledevice tooling.
 cp build/device_helper "$BIN_DIR/"
 cp build/airtraffic_host "$BIN_DIR/"
+cp build/airtraffic_discovery.dylib "$BIN_DIR/"
 
 # Copy python backend scripts
 cp apply_card_skin.py "$RESOURCES_DIR/"
 cp aircard.py "$RESOURCES_DIR/"
 cp aircard_backend.py "$RESOURCES_DIR/"
 cp card_assets.py "$RESOURCES_DIR/"
+cp docs/使用說明與疑難排解.md "$RESOURCES_DIR/"
 
 # A bundle without these cannot talk to a device at all, so fail here instead
 # of shipping an app that reports "No iPhone found" for every user.
-for tool in device_helper airtraffic_host; do
+for tool in device_helper airtraffic_host airtraffic_discovery.dylib; do
     if [ ! -x "${BIN_DIR}/${tool}" ]; then
         echo "ERROR: ${BIN_DIR}/${tool} is missing from the bundle." >&2
         exit 1
@@ -91,8 +94,8 @@ if [ -z "${SWIFT_SDK:-}" ]; then
         SWIFT_SDK="$CLT_SWIFTUI_SDK"
     fi
 fi
-swiftc -sdk "$SWIFT_SDK" -O -parse-as-library -target arm64-apple-macosx14.0 AirCardApp.swift -o build/AirCard_arm64
-swiftc -sdk "$SWIFT_SDK" -O -parse-as-library -target x86_64-apple-macosx14.0 AirCardApp.swift -o build/AirCard_x86_64
+swiftc -module-cache-path "$SCRIPT_DIR/.tmp/swift-module-cache" -sdk "$SWIFT_SDK" -O -parse-as-library -target arm64-apple-macosx14.0 AirCardApp.swift -o build/AirCard_arm64
+swiftc -module-cache-path "$SCRIPT_DIR/.tmp/swift-module-cache" -sdk "$SWIFT_SDK" -O -parse-as-library -target x86_64-apple-macosx14.0 AirCardApp.swift -o build/AirCard_x86_64
 lipo -create -output "${MACOS_DIR}/AirCard" build/AirCard_arm64 build/AirCard_x86_64
 chmod +x "${MACOS_DIR}/AirCard"
 
@@ -100,6 +103,11 @@ echo "==> [5/6] Setting permissions and signing ${APP_NAME}.app bundle..."
 chmod -R 755 "$APP_DIR"
 xattr -cr "$APP_DIR" 2>/dev/null || true
 codesign --force --deep --sign - "$APP_DIR"
+
+if [ "${1:-}" = "--app-only" ]; then
+    echo "Built ${APP_DIR} (installed app was not replaced)."
+    exit 0
+fi
 
 echo "==> [6/6] Generating styled DMG (${APP_NAME}.dmg)..."
 DMG_STAGING="/tmp/aircard_dmg_staging"
@@ -119,7 +127,6 @@ if command -v create-dmg >/dev/null 2>&1; then
         --icon "AirCard.app" 175 220 \
         --hide-extension "AirCard.app" \
         --app-drop-link 525 220 \
-        --add-file "README.txt" "dmg_assets/README.txt" 350 360 \
         --filesystem APFS \
         --overwrite \
         "build/${APP_NAME}.dmg" \

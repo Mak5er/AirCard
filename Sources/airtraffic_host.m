@@ -26,7 +26,7 @@ extern CFTypeRef ATCFMessageGetParam(CFDictionaryRef message, CFStringRef key);
 
 static void TimeoutHandler(int signalNumber) {
     (void)signalNumber;
-    const char message[] = "{\"ok\":false,\"error\":\"timeout\"}\n";
+    const char message[] = "{\"ok\":false,\"error\":\"連線逾時\"}\n";
     (void)write(STDOUT_FILENO, message, sizeof(message) - 1);
     _exit(124);
 }
@@ -66,47 +66,52 @@ static BOOL ManifestContains(NSDictionary *manifest, NSString *identifier) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
-        if (argc < 6 || argc % 2 != 0) {
+        BOOL removeCache = argc > 2 && strcmp(argv[1], "--remove-cache") == 0;
+        if (removeCache) { argv++; argc--; }
+        BOOL probeOnly = argc == 3 && strcmp(argv[1], "--probe") == 0;
+        if (!probeOnly && (argc < 6 || argc % 2 != 0)) {
             PrintJSON(@{ @"ok": @NO,
-                         @"error": @"usage: airtraffic_host udid id path [id path ...]" });
+                         @"error": @"用法：airtraffic_host udid id path [id path ...]" });
             return 64;
         }
 
-        NSUInteger pairCount = (NSUInteger)(argc - 2) / 2;
+        NSUInteger pairCount = probeOnly ? 0 : (NSUInteger)(argc - 2) / 2;
         if (pairCount > 2048) {
-            PrintJSON(@{ @"ok": @NO, @"error": @"too many assets" });
+            PrintJSON(@{ @"ok": @NO, @"error": @"素材數量過多" });
             return 64;
         }
 
-        NSString *deviceIdentifier = [NSString stringWithUTF8String:argv[1]];
+        NSString *deviceIdentifier = [NSString stringWithUTF8String:argv[probeOnly ? 2 : 1]];
         NSMutableArray<NSDictionary *> *assets = NSMutableArray.array;
-        for (int index = 2; index < argc; index += 2) {
+        for (int index = 2; !probeOnly && index < argc; index += 2) {
             NSString *identifier = [NSString stringWithUTF8String:argv[index]];
             NSString *destination =
                 [NSString stringWithUTF8String:argv[index + 1]];
             if (!identifier.length || !destination.length) {
-                PrintJSON(@{ @"ok": @NO, @"error": @"empty argument" });
+                PrintJSON(@{ @"ok": @NO, @"error": @"參數為空" });
                 return 64;
             }
             [assets addObject:@{ @"identifier": identifier,
                                  @"destination": destination }];
         }
         if (!deviceIdentifier.length) {
-            PrintJSON(@{ @"ok": @NO, @"error": @"empty device identifier" });
+            PrintJSON(@{ @"ok": @NO, @"error": @"裝置識別碼為空" });
             return 64;
         }
 
         signal(SIGPIPE, SIG_IGN);
         signal(SIGALRM, TimeoutHandler);
-        alarm(300);
+        alarm(probeOnly ? 15 : 300);
+        PrintJSON(@{ @"type": @"atc_status", @"message": @"正在連線 AirTraffic…" });
         ATHostConnectionRef connection =
             ATHostConnectionCreate((__bridge CFStringRef)deviceIdentifier);
         if (!connection) {
             PrintJSON(@{ @"ok": @NO,
-                         @"error": @"AirTraffic connection failed" });
+                         @"error": @"AirTraffic 連線失敗" });
             return 2;
         }
 
+        PrintJSON(@{ @"type": @"atc_status", @"message": @"正在等待同步許可（SyncAllowed）…" });
         BOOL syncAllowed = NO;
         for (NSUInteger index = 0; index < 8 && !syncAllowed; index++) {
             CFDictionaryRef raw = ATHostConnectionReadMessage(connection);
@@ -121,8 +126,15 @@ int main(int argc, const char *argv[]) {
         if (!syncAllowed) {
             ATHostConnectionRelease(connection);
             PrintJSON(@{ @"ok": @NO,
-                         @"error": @"SyncAllowed not observed" });
+                         @"error": @"未收到同步許可 SyncAllowed" });
             return 3;
+        }
+
+        if (probeOnly) {
+            ATHostConnectionRelease(connection);
+            alarm(0);
+            PrintJSON(@{ @"ok": @YES, @"syncAllowed": @YES });
+            return 0;
         }
 
         NSDictionary *hostInfo = HostInfo();
@@ -135,6 +147,7 @@ int main(int argc, const char *argv[]) {
             (__bridge CFDictionaryRef)@{},
             (__bridge CFDictionaryRef)hostInfo);
 
+        PrintJSON(@{ @"type": @"atc_status", @"message": @"正在等待同步就緒（ReadyForSync）…" });
         BOOL ready = NO;
         for (NSUInteger index = 0; index < 12 && !ready; index++) {
             CFDictionaryRef raw = ATHostConnectionReadMessage(connection);
@@ -149,7 +162,7 @@ int main(int argc, const char *argv[]) {
         if (!ready) {
             ATHostConnectionRelease(connection);
             PrintJSON(@{ @"ok": @NO,
-                         @"error": @"ReadyForSync not observed" });
+                         @"error": @"未收到同步就緒訊息 ReadyForSync" });
             return 4;
         }
 
@@ -158,6 +171,7 @@ int main(int argc, const char *argv[]) {
             (__bridge CFDictionaryRef)@{ @"Book": @1 },
             (__bridge CFDictionaryRef)@{});
 
+        PrintJSON(@{ @"type": @"atc_status", @"message": @"正在等待資源清單…" });
         NSDictionary *manifest = nil;
         for (NSUInteger index = 0; index < 20 && !manifest; index++) {
             CFDictionaryRef raw = ATHostConnectionReadMessage(connection);
@@ -179,14 +193,28 @@ int main(int argc, const char *argv[]) {
             CFRelease(raw);
         }
 
-        NSUInteger missing = 0;
+        // Cache files may already be absent; the relocated link must be present.
+        // All other operations still require the complete manifest before any move.
+        if (removeCache) {
+            NSMutableArray *present = NSMutableArray.array;
+            for (NSUInteger index = 0; index < assets.count; index++) {
+                NSDictionary *asset = assets[index];
+                if (index == 0 || ManifestContains(manifest, asset[@"identifier"]))
+                    [present addObject:asset];
+            }
+            assets = present;
+        }
+        NSMutableArray<NSString *> *missingIdentifiers = NSMutableArray.array;
         for (NSDictionary *asset in assets)
-            if (!ManifestContains(manifest, asset[@"identifier"])) missing++;
+            if (!ManifestContains(manifest, asset[@"identifier"]))
+                [missingIdentifiers addObject:asset[@"identifier"]];
+        NSUInteger missing = missingIdentifiers.count;
         if (missing) {
             ATHostConnectionRelease(connection);
             PrintJSON(@{ @"ok": @NO,
-                         @"error": @"expected assets absent from manifest",
-                         @"missingCount": @(missing) });
+                         @"error": @"同步清單缺少預期素材",
+                         @"missingCount": @(missing),
+                         @"missingIdentifiers": missingIdentifiers });
             return 5;
         }
 

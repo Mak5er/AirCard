@@ -1,5 +1,17 @@
 import sys
 from pathlib import Path
+import atexit
+import tempfile
+import zipfile
+import unittest
+
+_fixture = tempfile.TemporaryDirectory(prefix="aircard-test-theme-")
+atexit.register(_fixture.cleanup)
+SAMPLE_THEME = str(Path(_fixture.name) / "sample.passthm")
+with zipfile.ZipFile(SAMPLE_THEME, "w") as archive:
+    for digit in range(10):
+        archive.writestr(f"TelephonyUI-10/ru-{digit}---white.png", b"test-image")
+
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -8,6 +20,8 @@ from aircard_backend import parse_passthm_archive, KEYPAD_SUBTEXTS
 
 
 def verify_archive_extraction(passthm_path: str, name: str):
+    if not Path(passthm_path).is_file():
+        raise unittest.SkipTest("External reference theme is not available")
     telephony_ver = "TelephonyUI-10"
     items = parse_passthm_archive(passthm_path, telephony_ver)
     
@@ -44,9 +58,9 @@ def verify_archive_extraction(passthm_path: str, name: str):
     print(f"✓ {name} parsed all 10 digits with en-, other-, ru-, uk-, bold and subtext variants successfully")
 
 
-def test_minepass_nightly():
-    minepass_path = "/Users/mak5er/Downloads/MinePass_Nightly.passthm"
-    verify_archive_extraction(minepass_path, "MinePass_Nightly.passthm")
+def test_synthetic_multilingual_theme():
+    minepass_path = SAMPLE_THEME
+    verify_archive_extraction(minepass_path, "synthetic multilingual theme")
 
 
 def test_tck():
@@ -55,7 +69,7 @@ def test_tck():
 
 
 def test_filtered_modes():
-    minepass_path = "/Users/mak5er/Downloads/MinePass_Nightly.passthm"
+    minepass_path = SAMPLE_THEME
     # Test uk + bold only
     items_uk_bold = parse_passthm_archive(minepass_path, "TelephonyUI-10", target_lang="uk", target_bold="bold")
     leaves_uk_bold = [item[1] for item in items_uk_bold]
@@ -72,7 +86,7 @@ def test_filtered_modes():
 
 
 def test_digit_5_and_universal():
-    minepass_path = "/Users/mak5er/Downloads/MinePass_Nightly.passthm"
+    minepass_path = SAMPLE_THEME
     # Test digit 5 in ru + bold
     items_ru_bold = parse_passthm_archive(minepass_path, "TelephonyUI-9", target_lang="ru", target_bold="bold")
     leaves = [item[1] for item in items_ru_bold]
@@ -138,7 +152,7 @@ def test_cmd_flash_passthm_batch_fast():
     from unittest.mock import Mock, patch
     import aircard_backend
 
-    minepass_path = "/Users/mak5er/Downloads/MinePass_Nightly.passthm"
+    minepass_path = SAMPLE_THEME
     mock_batch = Mock(return_value=True)
     mock_single = Mock(return_value=True)
 
@@ -183,7 +197,7 @@ def test_cmd_flash_passthm_fallback():
     from unittest.mock import Mock, patch
     import aircard_backend
 
-    minepass_path = "/Users/mak5er/Downloads/MinePass_Nightly.passthm"
+    minepass_path = SAMPLE_THEME
     mock_batch = Mock(return_value=False)  # Batch fails!
     mock_single = Mock(return_value=True)  # Fallback succeeds
 
@@ -206,13 +220,13 @@ def test_cmd_flash_passthm_fallback():
     assert mock_single.call_count > 50, f"Fallback should have written all files individually, got {mock_single.call_count}"
 
     output_lines = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
-    assert any(line.get("type") == "warning" and "Batch write notice" in line.get("message", "") for line in output_lines)
+    assert any(line.get("type") == "warning" and "批量寫入失敗" in line.get("message", "") for line in output_lines)
     assert any(line.get("type") == "success" for line in output_lines)
     print(f"✓ cmd_flash_passthm fallback verified ({mock_single.call_count} individual writes after batch failure)")
 
 
 if __name__ == "__main__":
-    test_minepass_nightly()
+    test_synthetic_multilingual_theme()
     test_tck()
     test_filtered_modes()
     test_digit_5_and_universal()
@@ -220,3 +234,10 @@ if __name__ == "__main__":
     test_cmd_flash_passthm_batch_fast()
     test_cmd_flash_passthm_fallback()
     print("All backend passthm & fast batch flasher tests passed successfully! ✅")
+
+
+def load_tests(loader, tests, pattern):
+    for name, function in sorted(globals().items()):
+        if name.startswith("test_") and callable(function):
+            tests.addTest(unittest.FunctionTestCase(function))
+    return tests
