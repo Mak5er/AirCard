@@ -144,34 +144,67 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
 
     pkpass_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
     
-    total_steps = 4
+    # Steps: one per artwork file written, plus the two cache invalidations.
+    num_assets = len(asset_payloads)
+    total_steps = num_assets + 2
     step = 0
     all_ok = True
 
-    step += 1
     print(json.dumps({
         "type": "progress",
         "card": card_hash,
         "step": step,
         "total": total_steps,
-        "message": f"Writing {len(asset_payloads)} artwork files (fast batch)..."
+        "message": f"Writing {num_assets} artwork files (fast batch)..."
     }))
     sys.stdout.flush()
 
+    # Stream per-file progress during the batch upload so the UI advances
+    # instead of parking at the first step for the whole transfer.
+    def on_batch_progress(p: dict):
+        idx = p.get("index", 0)
+        leaf = p.get("leaf", "")
+        curr = min(idx, num_assets)
+        print(json.dumps({
+            "type": "progress",
+            "card": card_hash,
+            "step": curr,
+            "total": total_steps,
+            "leaf": leaf,
+            "message": f"Writing {leaf} ({curr}/{total_steps})..."
+        }))
+        sys.stdout.flush()
+
     try:
-        ok = write_files_batch(udid, pkpass_dir, asset_payloads)
+        ok = write_files_batch(
+            udid,
+            pkpass_dir,
+            asset_payloads,
+            progress_callback=on_batch_progress,
+        )
     except (OSError, RuntimeError, subprocess.SubprocessError):
         ok = False
 
     if not ok:
         # Fallback to individual writes if batch fails
-        for asset, payload in asset_payloads:
+        for f_idx, (asset, payload) in enumerate(asset_payloads, 1):
+            print(json.dumps({
+                "type": "progress",
+                "card": card_hash,
+                "step": min(f_idx, num_assets),
+                "total": total_steps,
+                "leaf": asset,
+                "message": f"[Fallback] Writing {asset} ({f_idx}/{num_assets})..."
+            }))
+            sys.stdout.flush()
             try:
                 ok_single = write_file(udid, pkpass_dir, asset, payload)
             except Exception:
                 ok_single = False
             if not ok_single:
                 all_ok = False
+
+    step = num_assets
 
     # Wallet v2: genuinely unlink rendered faces. Writing corrupt bytes here can
     # leave the previous artwork resident indefinitely on iOS 27.
@@ -201,7 +234,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
             }))
             sys.stdout.flush()
 
-    step += 1
+    step = total_steps
     if not all_ok:
         print(json.dumps({
             "type": "error",
