@@ -64,7 +64,7 @@
 5. Use the **Digits** color picker when you only want to change the Wallet card number color. This setting is available with or without a custom image.
 6. Enter exactly four ASCII digits to change the suffix, or enter `NULL` to hide it. Leave the field blank to keep the current suffix unchanged.
 7. Click **Flash Skins** and review the database warning when colors or the card-number suffix are selected.
-8. For database changes, fully restart the iPhone; reopening Wallet is not enough. For artwork-only changes, force-close and reopen Wallet.
+8. For database changes, fully restart the iPhone; reopening Wallet is not enough. AirCard offers a **Restart iPhone Now** button after a successful database update, but iOS may reject the restart request. If it does, restart the iPhone manually. For artwork-only changes, force-close and reopen Wallet.
 
 ### If scanning finds no cards
 

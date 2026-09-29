@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #import "airlift_target.h"
@@ -335,6 +336,81 @@ static int RunSyslog(void) {
     AMDeviceStopSession(device);
     AMDeviceDisconnect(device);
     return status;
+}
+
+static int RunRestart(void) {
+    if (FindTarget() != 0 || !TargetDevice) {
+        fprintf(stderr, "AirCard restart: iPhone not found. Reconnect it via USB.\n");
+        return 2;
+    }
+    AMDeviceRef device = TargetDevice;
+    if (AMDeviceConnect(device) != 0) {
+        fprintf(stderr, "AirCard restart: Could not connect to the iPhone.\n");
+        return 2;
+    }
+    if (!AMDeviceIsPaired(device)) AMDevicePair(device);
+    if (AMDeviceValidatePairing(device) != 0) {
+        AMDevicePair(device);
+    }
+    if (AMDeviceValidatePairing(device) != 0 ||
+        AMDeviceStartSession(device) != 0) {
+        fprintf(stderr, "AirCard restart: Unlock the iPhone and trust this Mac, then retry.\n");
+        AMDeviceDisconnect(device);
+        return 2;
+    }
+
+    AMDServiceConnectionRef connection = NULL;
+    if (AMDeviceSecureStartService(
+            device, CFSTR("com.apple.mobile.diagnostics_relay"),
+            NULL, &connection) != 0 || !connection) {
+        fprintf(stderr, "AirCard restart: The iPhone does not allow restart requests over USB.\n");
+        AMDeviceStopSession(device);
+        AMDeviceDisconnect(device);
+        return 2;
+    }
+
+    struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+    int socket = AMDServiceConnectionGetSocket(connection);
+    if (socket >= 0) {
+        setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    }
+
+    NSDictionary *request = @{
+        @"Request": @"Restart",
+        @"WaitForDisconnect": @NO,
+    };
+    int result = 2;
+    BOOL requestSent = AMDServiceConnectionSendMessage(
+        connection,
+        (__bridge CFDictionaryRef)request,
+        kCFPropertyListBinaryFormat_v1_0) == 0;
+    if (!requestSent) {
+        fprintf(stderr, "AirCard restart: Could not send the restart request.\n");
+    } else {
+        CFTypeRef response = NULL;
+        CFPropertyListFormat format = kCFPropertyListBinaryFormat_v1_0;
+        int receiveStatus = AMDServiceConnectionReceiveMessage(
+            connection, &response, &format);
+        id reply = response ? CFBridgingRelease(response) : nil;
+        if (receiveStatus == 0 &&
+            [reply isKindOfClass:NSDictionary.class] &&
+            [reply[@"Status"] isEqual:@"Success"]) {
+            result = 0;
+            fprintf(stdout, "The iPhone accepted the restart request.\n");
+        } else if (receiveStatus != 0) {
+            // Some iOS versions disconnect the diagnostics service as soon as
+            // the restart begins, before the acknowledgement reaches the Mac.
+            result = 3;
+            fprintf(stderr, "AirCard restart: Request sent, but confirmation was unavailable.\n");
+        } else {
+            fprintf(stderr, "AirCard restart: The iPhone rejected the restart request.\n");
+        }
+    }
+
+    AMDServiceConnectionInvalidate(connection);
+    AMDeviceStopSession(device);
+    AMDeviceDisconnect(device);
+    return result;
 }
 
 static void OpenSession(DeviceSession *session) {
@@ -1237,6 +1313,18 @@ int main(int argc, const char *argv[]) {
                 kCFAllocatorDefault, argv[2], kCFStringEncodingUTF8);
             if (!TargetIdentifier) return 64;
             int status = RunSyslog();
+            if (TargetDevice) {
+                CFRelease(TargetDevice);
+                TargetDevice = NULL;
+            }
+            CFRelease(TargetIdentifier);
+            return status;
+        }
+        if ([command isEqual:@"restart"] && argc == 3) {
+            TargetIdentifier = CFStringCreateWithCString(
+                kCFAllocatorDefault, argv[2], kCFStringEncodingUTF8);
+            if (!TargetIdentifier) return 64;
+            int status = RunRestart();
             if (TargetDevice) {
                 CFRelease(TargetDevice);
                 TargetDevice = NULL;

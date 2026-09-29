@@ -578,6 +578,9 @@ class AppViewModel: ObservableObject {
     @Published var statusText: String = "Ready"
     @Published var logs: [String] = []
     @Published var showSuccessAlert = false
+    @Published var isShowingRestartResult = false
+    @Published var restartResultMessage = ""
+    @Published var isRestartingDevice = false
     @Published var showColorRiskAlert = false
     @Published var lastFlashChangedDatabase = false
     @Published var errorMessage: String?
@@ -841,7 +844,8 @@ class AppViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self = self,
                       !self.isFlashing,
-                      !self.isScanningCards else { return }
+                      !self.isScanningCards,
+                      !self.isRestartingDevice else { return }
                 self.checkDevice(silent: true)
             }
         }
@@ -1529,6 +1533,87 @@ class AppViewModel: ObservableObject {
             }
         }
     }
+
+    func restartConnectedDevice() {
+        guard !isRestartingDevice else { return }
+        guard let udid = device?.udid else {
+            restartResultMessage =
+                "No iPhone is connected. Restart it manually to apply the database changes."
+            isShowingRestartResult = true
+            showSuccessAlert = true
+            return
+        }
+        guard let deviceHelper = AppViewModel.deviceHelperExecutableURL else {
+            restartResultMessage =
+                "AirCard's device tools are unavailable. Restart the iPhone manually to apply the database changes."
+            isShowingRestartResult = true
+            showSuccessAlert = true
+            return
+        }
+
+        isRestartingDevice = true
+        statusText = "Sending restart request to the iPhone..."
+        log("Requesting an iPhone restart over the trusted USB connection...")
+
+        Task.detached {
+            let process = Process()
+            process.executableURL = deviceHelper
+            process.environment = AppViewModel.processEnvironment
+            process.arguments = ["restart", udid]
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            var launchError: Error?
+            var outputText = ""
+            do {
+                try process.run()
+                let outputData = pipe.fileHandleForReading.readDataToEndOfFile()
+                outputText = String(data: outputData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                process.waitUntilExit()
+            } catch {
+                launchError = error
+            }
+            let launchErrorDescription = launchError?.localizedDescription
+            let resultOutputText = outputText
+
+            await MainActor.run {
+                self.isRestartingDevice = false
+                if let launchErrorDescription {
+                    self.restartResultMessage =
+                        "AirCard could not request the restart: "
+                        + launchErrorDescription
+                        + "\n\nRestart the iPhone manually."
+                } else if process.terminationStatus == 0 {
+                    self.restartResultMessage =
+                        "The iPhone accepted the restart request and should restart now. "
+                        + "If it does not, restart it manually."
+                    self.log("The iPhone accepted the restart request.")
+                } else if process.terminationStatus == 3 {
+                    self.restartResultMessage =
+                        (resultOutputText.isEmpty
+                            ? "The restart request was sent, but AirCard could not confirm it."
+                            : resultOutputText)
+                        + " "
+                        + "If the iPhone does not restart shortly, restart it manually."
+                    self.log("Restart request sent, but device confirmation was unavailable.")
+                } else {
+                    self.restartResultMessage =
+                        (resultOutputText.isEmpty
+                            ? "AirCard could not restart the iPhone."
+                            : resultOutputText)
+                        + " Keep it connected and trusted, "
+                        + "or restart it manually."
+                    self.log("The iPhone restart request failed.")
+                }
+                self.statusText = "Wallet database update complete."
+                self.isShowingRestartResult = true
+                self.showSuccessAlert = true
+            }
+        }
+    }
     
     // MARK: - Passcode Theme (.passthm) Handlers
     
@@ -1595,6 +1680,7 @@ class AppViewModel: ObservableObject {
             errorMessage = "Please connect and trust your iPhone first."
             return
         }
+        lastFlashChangedDatabase = false
         
         isFlashing = true
         showLogs = true
@@ -2318,13 +2404,29 @@ struct ContentView: View {
                 .background(Color(NSColor.controlBackgroundColor))
         }
         .frame(minWidth: 880, minHeight: 680)
-        .alert("Success!", isPresented: $vm.showSuccessAlert) {
-            Button("OK") {}
-        } message: {
-            if vm.selectedTab == .passcodeThemes {
-                Text("Passcode theme successfully applied!\n\nLock your iPhone (or restart) to see your new passcode keypad.")
+        .alert(
+            vm.isShowingRestartResult ? "iPhone Restart" : "Success!",
+            isPresented: $vm.showSuccessAlert
+        ) {
+            if vm.isShowingRestartResult {
+                Button("OK") {
+                    vm.isShowingRestartResult = false
+                }
             } else if vm.lastFlashChangedDatabase {
-                Text("The Wallet card number color or suffix was updated.\n\nA full iPhone restart is required. Reopening or force-closing Wallet will not apply the database changes.")
+                Button("Restart iPhone Now") {
+                    vm.restartConnectedDevice()
+                }
+                Button("Later", role: .cancel) {}
+            } else {
+                Button("OK") {}
+            }
+        } message: {
+            if vm.isShowingRestartResult {
+                Text(vm.restartResultMessage)
+            } else if vm.lastFlashChangedDatabase {
+                Text("The Wallet card number color or suffix was updated.\n\nA full iPhone restart is required. Choose Restart iPhone Now to reboot the connected device. The connection will drop while it restarts. If iOS rejects the request, restart it manually.")
+            } else if vm.selectedTab == .passcodeThemes {
+                Text("Passcode theme successfully applied!\n\nLock your iPhone (or restart) to see your new passcode keypad.")
             } else {
                 Text("Artwork successfully applied to all selected cards!\n\nForce-close and reopen Wallet to see the new artwork.")
             }
