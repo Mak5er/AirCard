@@ -2441,10 +2441,8 @@ struct ContentView: View {
             }
         } message: {
             Text(
-                "This changes the live Wallet database and can temporarily "
-                + "make cards disappear. Continue only if you accept the risk."
-                + "\n\nRecovery: restart the iPhone, open Wallet, wait briefly, "
-                + "swipe Wallet away, then open it again."
+                "This modifies the live Wallet database and may make cards "
+                + "disappear. Close Wallet first."
             )
         }
         .sheet(isPresented: $showCredits) {

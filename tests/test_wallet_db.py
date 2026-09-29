@@ -57,7 +57,7 @@ def database_bytes(
 
 
 class WalletDBInspectionTests(unittest.TestCase):
-    def test_delete_journal_database_without_sidecars(self) -> None:
+    def test_inspects_delete_journal_database(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "fixture.sqlite"
             create_database(
@@ -86,11 +86,9 @@ class WalletDBInspectionTests(unittest.TestCase):
         self.assertEqual(result["foregroundColor"], "rgb(1, 2, 3)")
         self.assertIsNone(result["primaryAccountSuffix"])
         self.assertEqual(
-            result["sidecars"],
-            {"journal": False, "wal": False, "shm": False},
+            result["fileSizes"],
+            {"passes23.sqlite": len(fixtures["passes23.sqlite"])},
         )
-        self.assertIsNone(result["fileSizes"]["passes23.sqlite-journal"])
-        self.assertIsNone(result["fileSizes"]["passes23.sqlite-wal"])
         self.assertNotIn(CARD_HASH, json.dumps(result))
 
     def test_wal_database_is_rejected_by_local_patch_gate(self) -> None:
@@ -133,16 +131,16 @@ class WalletDBInspectionTests(unittest.TestCase):
                 primary_account_suffix="0042",
             )
 
-    def test_device_inspection_propagates_guarded_read_failure(self) -> None:
+    def test_device_inspection_propagates_database_read_failure(self) -> None:
         with (
             patch.object(
                 apply_card_skin,
                 "_extract_wallet_db_main_without_sidecars",
                 side_effect=RuntimeError(
-                    "sidecars-present-or-unknown-before-read"
+                    "database transport failed"
                 ),
             ),
-            self.assertRaisesRegex(RuntimeError, "sidecars-present"),
+            self.assertRaisesRegex(RuntimeError, "database transport failed"),
         ):
             apply_card_skin.inspect_wallet_db("device", CARD_HASH)
 
@@ -212,17 +210,6 @@ class WalletDBInspectionTests(unittest.TestCase):
         ):
             apply_card_skin.inspect_wallet_db("device", "../outside")
         read_database.assert_not_called()
-
-    def test_sidecar_transport_failure_is_not_treated_as_absent(self) -> None:
-        with (
-            patch.object(
-                apply_card_skin,
-                "_extract_wallet_db_main_without_sidecars",
-                side_effect=RuntimeError("transport interrupted"),
-            ),
-            self.assertRaisesRegex(RuntimeError, "transport interrupted"),
-        ):
-            apply_card_skin.inspect_wallet_db("device", CARD_HASH)
 
     def test_cli_prints_one_sanitized_json_object(self) -> None:
         output = StringIO()
@@ -415,7 +402,7 @@ class WalletDBPatchTests(unittest.TestCase):
         extract_database.assert_called_once_with("device", "prepare")
         self.assertEqual(len(result["cards"]), 2)
 
-    def test_batch_apply_writes_wallet_database_once(self) -> None:
+    def test_batch_apply_writes_without_device_readback(self) -> None:
         prepared = apply_card_skin.patch_wallet_db_batch(
             self.original,
             [
@@ -424,14 +411,7 @@ class WalletDBPatchTests(unittest.TestCase):
             ],
         )
         with (
-            patch.object(
-                apply_card_skin,
-                "_extract_wallet_db_main_without_sidecars",
-                side_effect=[
-                    prepared["originalBytes"],
-                    prepared["patchedBytes"],
-                ],
-            ) as extract_database,
+            patch.object(apply_card_skin, "_extract_wallet_db_main_without_sidecars") as extract_database,
             patch.object(
                 apply_card_skin,
                 "write_file",
@@ -444,6 +424,10 @@ class WalletDBPatchTests(unittest.TestCase):
             )
 
         self.assertEqual(len(inspected), 2)
+        self.assertEqual(
+            inspected[0]["appliedColors"]["foreground_color"],
+            "rgba(170, 187, 204, 1.00)",
+        )
         write_database.assert_called_once_with(
             "device",
             apply_card_skin.WALLET_DB_TARGET,
@@ -451,7 +435,7 @@ class WalletDBPatchTests(unittest.TestCase):
             prepared["patchedBytes"],
             retries=1,
         )
-        self.assertEqual(extract_database.call_count, 2)
+        extract_database.assert_not_called()
 
     def test_batch_rejects_duplicate_card_updates(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate"):
@@ -590,70 +574,13 @@ class WalletDBPatchTests(unittest.TestCase):
                 foreground_color="#000000",
             )
 
-    def test_sidecar_presence_is_rejected_before_patch(self) -> None:
-        with (
-            patch.object(
-                apply_card_skin,
-                "_extract_wallet_db_main_without_sidecars",
-                side_effect=RuntimeError(
-                    "sidecars-present-or-unknown-before-read"
-                ),
-            ),
-            self.assertRaisesRegex(RuntimeError, "sidecars-present"),
-        ):
-            apply_card_skin.prepare_wallet_db_patch(
-                "device",
-                CARD_HASH,
-                foreground_color="#000000",
-            )
-
-    def test_sidecar_check_failure_is_rejected_as_unknown(self) -> None:
-        with (
-            patch.object(
-                apply_card_skin,
-                "_extract_wallet_db_main_without_sidecars",
-                side_effect=RuntimeError("transport interrupted"),
-            ),
-            self.assertRaisesRegex(RuntimeError, "transport interrupted"),
-        ):
-            apply_card_skin.prepare_wallet_db_patch(
-                "device",
-                CARD_HASH,
-                foreground_color="#000000",
-            )
-
-    def test_prewrite_mismatch_aborts_without_database_write(self) -> None:
+    def test_success_uses_transfer_result_without_device_readback(self) -> None:
         prepared = self.prepared()
         with (
             patch.object(
                 apply_card_skin,
                 "_extract_wallet_db_main_without_sidecars",
-                return_value=b"database changed",
-            ),
-            patch.object(apply_card_skin, "write_file") as write_database,
-            patch.object(
-                apply_card_skin,
-                "rollback_wallet_db_patch",
-            ) as rollback,
-            self.assertRaisesRegex(
-                apply_card_skin.WalletDBPrewriteChangedError,
-                "changed after preparation",
-            ),
-        ):
-            apply_card_skin.apply_wallet_db_patch("device", prepared)
-        write_database.assert_not_called()
-        rollback.assert_not_called()
-
-    def test_success_validates_exact_extracted_readback(self) -> None:
-        prepared = self.prepared()
-        with (
-            patch.object(
-                apply_card_skin,
-                "_extract_wallet_db_main_without_sidecars",
-                side_effect=[
-                    prepared["originalBytes"],
-                    prepared["patchedBytes"],
-                ],
+                side_effect=AssertionError("unexpected device readback"),
             ) as extract_database,
             patch.object(
                 apply_card_skin,
@@ -670,13 +597,11 @@ class WalletDBPatchTests(unittest.TestCase):
             prepared["patchedBytes"],
             retries=1,
         )
-        self.assertEqual(extract_database.call_count, 2)
-        self.assertEqual(result["quickCheck"], ["ok"])
-        self.assertEqual(result["journalMode"], "delete")
         self.assertEqual(
-            result["foregroundColor"],
+            result["appliedColors"]["foreground_color"],
             prepared["appliedColors"]["foreground_color"],
         )
+        extract_database.assert_not_called()
 
     def test_write_failure_with_original_still_present_needs_no_rollback_write(
         self,
@@ -688,79 +613,24 @@ class WalletDBPatchTests(unittest.TestCase):
                 "_extract_wallet_db_main_without_sidecars",
                 side_effect=[
                     prepared["originalBytes"],
-                    prepared["originalBytes"],
                 ],
-            ),
+            ) as extract_database,
             patch.object(
                 apply_card_skin,
                 "write_file",
                 return_value=False,
             ) as write_database,
-            patch.object(
-                apply_card_skin,
-                "_write_wallet_db_and_verify",
-                wraps=apply_card_skin._write_wallet_db_and_verify,
-            ),
             self.assertRaisesRegex(
                 RuntimeError,
-                "failed to write Wallet database",
+                "failed to write Wallet database; wallet database rollback verified",
             ),
         ):
             apply_card_skin.apply_wallet_db_patch("device", prepared)
         write_database.assert_called_once()
-
-    def test_prewrite_failure_reports_exact_phase(self) -> None:
-        def extract(
-            _udid,
-            _target,
-            leaf,
-            _output_path,
-            **_kwargs,
-        ):
-            raise FileNotFoundError(f"{leaf} file not found")
-
-        with (
-            patch.object(
-                apply_card_skin,
-                "extract_file",
-                side_effect=extract,
-            ),
-            self.assertRaisesRegex(
-                RuntimeError,
-                "apply-prewrite-main: FileNotFoundError: "
-                "passes23.sqlite file not found",
-            ),
-        ):
-            apply_card_skin._extract_wallet_db_main_without_sidecars(
-                "device",
-                "apply-prewrite",
-            )
-
-    def test_readback_mismatch_rolls_back_only_from_exact_patch(self) -> None:
-        prepared = self.prepared()
-        mismatched = prepared["patchedBytes"] + b"mismatch"
-        with (
-            patch.object(
-                apply_card_skin,
-                "_extract_wallet_db_main_without_sidecars",
-                side_effect=[
-                    prepared["originalBytes"],
-                    mismatched,
-                    mismatched,
-                ],
-            ),
-            patch.object(
-                apply_card_skin,
-                "write_file",
-                return_value=True,
-            ) as write_database,
-            self.assertRaisesRegex(
-                RuntimeError,
-                "FATAL: wallet database rollback could not be verified",
-            ),
-        ):
-            apply_card_skin.apply_wallet_db_patch("device", prepared)
-        self.assertEqual(write_database.call_count, 1)
+        extract_database.assert_called_once_with(
+            "device",
+            "rollback-current",
+        )
 
     def test_public_rollback_restores_only_exact_patched_bytes(self) -> None:
         prepared = self.prepared()
@@ -808,43 +678,10 @@ class WalletDBPatchTests(unittest.TestCase):
 
 
 class WalletDBTransportTests(unittest.TestCase):
-    def test_extract_main_rejects_any_present_sidecar(self) -> None:
-        for sidecar in (
-            "passes23.sqlite-journal",
-            "passes23.sqlite-wal",
-            "passes23.sqlite-shm",
-        ):
-            with self.subTest(sidecar=sidecar):
-                def extract(
-                    _udid,
-                    _target,
-                    leaf,
-                    _output_path,
-                    **_kwargs,
-                ):
-                    if leaf == "passes23.sqlite":
-                        return b"database"
-                    if leaf == sidecar:
-                        return b"sidecar"
-                    raise FileNotFoundError(leaf)
-
-                with (
-                    patch.object(
-                        apply_card_skin,
-                        "extract_file",
-                        side_effect=extract,
-                    ),
-                    self.assertRaisesRegex(RuntimeError, "sidecar exists"),
-                ):
-                    apply_card_skin._extract_wallet_db_main_without_sidecars(
-                        "device"
-                    )
-
-    def test_extract_main_accepts_only_explicitly_missing_sidecars(self) -> None:
+    def test_extract_main_only_transfers_primary_database(self) -> None:
         def extract(_udid, _target, leaf, _output_path, **_kwargs):
-            if leaf == "passes23.sqlite":
-                return b"database"
-            raise FileNotFoundError(leaf)
+            self.assertEqual(leaf, "passes23.sqlite")
+            return b"database"
 
         with patch.object(
             apply_card_skin,
@@ -858,17 +695,9 @@ class WalletDBTransportTests(unittest.TestCase):
             )
 
         self.assertEqual(database, b"database")
-        self.assertEqual(
-            [call.args[2] for call in extract_mock.call_args_list],
-            [
-                "passes23.sqlite",
-                "passes23.sqlite-journal",
-                "passes23.sqlite-wal",
-                "passes23.sqlite-shm",
-            ],
-        )
+        extract_mock.assert_called_once()
 
-    def test_extract_main_treats_sidecar_transport_error_as_unknown(self) -> None:
+    def test_extract_main_propagates_primary_database_transport_error(self) -> None:
         with (
             patch.object(
                 apply_card_skin,
@@ -879,7 +708,7 @@ class WalletDBTransportTests(unittest.TestCase):
         ):
             apply_card_skin._extract_wallet_db_main_without_sidecars("device")
 
-    def test_write_database_uses_airtraffic_and_extracts_readback(self) -> None:
+    def test_rollback_write_uses_airtraffic_and_extracts_readback(self) -> None:
         with (
             patch.object(
                 apply_card_skin,
@@ -910,7 +739,7 @@ class WalletDBTransportTests(unittest.TestCase):
             "apply-readback",
         )
 
-    def test_native_extract_allowlist_includes_all_database_sidecars(self) -> None:
+    def test_native_extract_allowlist_excludes_database_sidecars(self) -> None:
         source = (
             Path(apply_card_skin.ROOT) / "Sources" / "device_helper.m"
         ).read_text()
@@ -918,13 +747,14 @@ class WalletDBTransportTests(unittest.TestCase):
         end = source.index("\nstatic NSDictionary *FinishExtract", start)
         allowlist = source[start:end]
 
+        self.assertIn("passes23.sqlite", allowlist)
         for leaf in (
-            "passes23.sqlite",
             "passes23.sqlite-journal",
             "passes23.sqlite-wal",
             "passes23.sqlite-shm",
         ):
-            self.assertIn(leaf, allowlist)
+            self.assertNotIn(leaf, allowlist)
+            self.assertNotIn(leaf, apply_card_skin.EXTRACT_ALLOWED_LEAVES)
 
     def test_native_extract_cleanup_removes_recovery_before_rewrite(
         self,

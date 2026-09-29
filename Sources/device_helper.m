@@ -1196,9 +1196,6 @@ static long long ExtractLimitForLeaf(NSString *leaf) {
         @"cardBackgroundCombined@2x.png": @(16LL * 1024 * 1024),
         @"cardBackgroundCombined.pdf": @(16LL * 1024 * 1024),
         @"passes23.sqlite": @(128LL * 1024 * 1024),
-        @"passes23.sqlite-journal": @(128LL * 1024 * 1024),
-        @"passes23.sqlite-wal": @(128LL * 1024 * 1024),
-        @"passes23.sqlite-shm": @(8LL * 1024 * 1024),
     };
     return allowedLeaves[leaf].longLongValue;
 }

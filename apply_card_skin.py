@@ -33,9 +33,6 @@ CARD_HASH_RE = re.compile(r"^[A-Za-z0-9_+=-]{20,44}$")
 DEFAULT_EXTRACT_LIMIT = 16 * 1024 * 1024
 EXTRACT_LIMITS = {
     "passes23.sqlite": 128 * 1024 * 1024,
-    "passes23.sqlite-journal": 128 * 1024 * 1024,
-    "passes23.sqlite-wal": 128 * 1024 * 1024,
-    "passes23.sqlite-shm": 8 * 1024 * 1024,
 }
 EXTRACT_ALLOWED_LEAVES = frozenset(
     {
@@ -47,16 +44,7 @@ EXTRACT_ALLOWED_LEAVES = frozenset(
 )
 WALLET_DB_TARGET = "/var/mobile/Library/Passes"
 WALLET_DB_LEAF = "passes23.sqlite"
-WALLET_DB_SIDECARS = (
-    "passes23.sqlite-journal",
-    "passes23.sqlite-wal",
-    "passes23.sqlite-shm",
-)
 WALLET_DB_UNCHANGED = object()
-
-
-class WalletDBPrewriteChangedError(RuntimeError):
-    """Raised when the live database no longer matches the prepared snapshot."""
 
 
 class ExtractionRestoreError(RuntimeError):
@@ -620,8 +608,6 @@ def extract_file(
                             "reason", "AFC extraction failed"
                         )
                         if reason == "file not found":
-                            if leaf in WALLET_DB_SIDECARS:
-                                target_missing = True
                             raise FileNotFoundError(
                                 f"{leaf} file not found"
                             )
@@ -629,15 +615,7 @@ def extract_file(
 
                     extracted_data = output.read_bytes()
                     size_limit = EXTRACT_LIMITS.get(leaf, DEFAULT_EXTRACT_LIMIT)
-                    empty_allowed = leaf in {
-                        "passes23.sqlite-journal",
-                        "passes23.sqlite-wal",
-                        "passes23.sqlite-shm",
-                    }
-                    if (
-                        (not extracted_data and not empty_allowed)
-                        or len(extracted_data) > size_limit
-                    ):
+                    if not extracted_data or len(extracted_data) > size_limit:
                         raise RuntimeError(
                             f"extracted {leaf} is empty or too large"
                         )
@@ -1060,53 +1038,11 @@ def patch_wallet_db(
     }
 
 
-def _extract_optional_wallet_db_sidecar(
-    udid: str,
-    leaf: str,
-    output: Path,
-    phase: str,
-) -> bytes | None:
-    try:
-        return extract_file(
-            udid,
-            WALLET_DB_TARGET,
-            leaf,
-            os.fspath(output),
-            retries=1,
-            raise_errors=True,
-        )
-    except FileNotFoundError:
-        return None
-    except Exception as error:
-        raise RuntimeError(
-            f"{phase}-{leaf}: {type(error).__name__}: {error}"
-        ) from error
-
-
-def _require_wallet_db_sidecars_absent(
-    udid: str,
-    work: Path,
-    phase: str,
-) -> None:
-    for leaf in WALLET_DB_SIDECARS:
-        sidecar = _extract_optional_wallet_db_sidecar(
-            udid,
-            leaf,
-            work / leaf,
-            phase,
-        )
-        if sidecar is not None:
-            raise RuntimeError(
-                f"{phase}-{leaf}: wallet database sidecar exists; "
-                "refusing to write"
-            )
-
-
 def _extract_wallet_db_main_without_sidecars(
     udid: str,
     phase: str = "wallet-db",
 ) -> bytes:
-    """Extract the main DB and fail unless every journal sidecar is absent."""
+    """Extract the primary Wallet database file."""
     with tempfile.TemporaryDirectory(
         prefix="aircard-wallet-db-device-"
     ) as temporary:
@@ -1126,7 +1062,6 @@ def _extract_wallet_db_main_without_sidecars(
             ) from error
         if main is None:
             raise RuntimeError(f"{phase}-main: wallet database is unavailable")
-        _require_wallet_db_sidecars_absent(udid, work, f"{phase}-after")
         return main
 
 
@@ -1166,11 +1101,11 @@ def prepare_wallet_db_batch_patch(udid: str, updates: list[dict]) -> dict:
         ) from error
 
 
-def _write_wallet_db_and_verify(
+def _write_wallet_db(
     udid: str,
     replacement: bytes,
     phase: str = "apply",
-) -> bytes:
+) -> None:
     if not write_file(
         udid,
         WALLET_DB_TARGET,
@@ -1179,6 +1114,14 @@ def _write_wallet_db_and_verify(
         retries=1,
     ):
         raise RuntimeError(f"{phase}-write: failed to write Wallet database")
+
+
+def _write_wallet_db_and_verify(
+    udid: str,
+    replacement: bytes,
+    phase: str = "apply",
+) -> bytes:
+    _write_wallet_db(udid, replacement, phase)
     return _extract_wallet_db_main_without_sidecars(
         udid,
         f"{phase}-readback",
@@ -1235,8 +1178,7 @@ def rollback_wallet_db_patch(udid: str, prepared: dict) -> None:
 
 
 def apply_wallet_db_batch_patch(udid: str, prepared: dict) -> list[dict]:
-    """Write one prepared DB image and verify every requested card update."""
-    original = prepared["originalBytes"]
+    """Write one prepared DB image without reading it back."""
     patched = prepared["patchedBytes"]
     cards = prepared.get("cards")
     if cards is None:
@@ -1245,57 +1187,9 @@ def apply_wallet_db_batch_patch(udid: str, prepared: dict) -> list[dict]:
             "appliedColors": prepared["appliedColors"],
         }]
 
-    write_attempted = False
     try:
-        prewrite = _extract_wallet_db_main_without_sidecars(
-            udid,
-            "apply-prewrite",
-        )
-        if prewrite != original:
-            raise WalletDBPrewriteChangedError(
-                "apply-prewrite-compare: wallet database changed after "
-                "preparation; refusing to write"
-            )
-        write_attempted = True
-        readback = _write_wallet_db_and_verify(udid, patched, "apply")
-        if readback != patched:
-            raise RuntimeError(
-                "apply-readback-compare: Wallet database readback bytes "
-                "do not match"
-            )
-        inspected_cards = inspect_wallet_db_batch_bytes(
-            readback,
-            [card["cardHash"] for card in cards],
-        )
-        for card, inspected in zip(cards, inspected_cards):
-            if inspected["journalMode"] != "delete":
-                raise RuntimeError(
-                    "apply-journal-mode: Wallet database journal mode changed"
-                )
-            expected = card["appliedColors"]
-            actual = {
-                "foreground_color": inspected["foregroundColor"],
-                "primary_account_suffix": inspected[
-                    "primaryAccountSuffix"
-                ],
-            }
-            mismatches = [
-                column
-                for column, value in expected.items()
-                if actual[column] != value
-            ]
-            if mismatches:
-                raise RuntimeError(
-                    "apply-value-check: Wallet database values did not persist: "
-                    + ", ".join(mismatches)
-                )
-        return inspected_cards
+        _write_wallet_db(udid, patched, "apply")
     except Exception as error:
-        if (
-            isinstance(error, WalletDBPrewriteChangedError)
-            or not write_attempted
-        ):
-            raise
         try:
             rollback_wallet_db_patch(udid, prepared)
         except RuntimeError as rollback_error:
@@ -1303,6 +1197,7 @@ def apply_wallet_db_batch_patch(udid: str, prepared: dict) -> list[dict]:
         raise RuntimeError(
             f"{error}; wallet database rollback verified"
         ) from error
+    return cards
 
 
 def apply_wallet_db_patch(udid: str, prepared: dict) -> dict:
@@ -1318,11 +1213,7 @@ def inspect_wallet_db(udid: str, card_hash: str) -> dict:
     return {
         "fileSizes": {
             WALLET_DB_LEAF: len(database),
-            "passes23.sqlite-journal": None,
-            "passes23.sqlite-wal": None,
-            "passes23.sqlite-shm": None,
         },
-        "sidecars": {"journal": False, "wal": False, "shm": False},
         **inspected,
     }
 

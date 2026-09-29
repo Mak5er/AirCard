@@ -46,9 +46,8 @@
 ## How to Customize Apple Wallet Cards
 
 > [!WARNING]
-> **Colors and card-number suffixes access the live Wallet database.**
-> They can temporarily make cards disappear or corrupt the database. Continue
-> only if you accept the risk. Artwork-only changes do not access this database.
+> **Wallet color and suffix edits modify the live database and may make cards
+> disappear.** Close Wallet first. Artwork-only changes do not access the DB.
 >
 > **If cards disappear:** stop retrying, restart the iPhone, open Wallet, wait
 > briefly, swipe Wallet away, then open it again. This worked repeatedly in

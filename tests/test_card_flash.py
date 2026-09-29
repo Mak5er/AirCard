@@ -238,70 +238,32 @@ class CardFlashTests(unittest.TestCase):
         self.assertEqual(snapshots, 1)
         write_file.assert_not_called()
 
-    def test_extract_file_cleans_up_missing_optional_sidecar(
+    def test_extract_file_rejects_removed_sidecar_leaves_before_device_io(
         self,
     ) -> None:
-        successful_operation = {
-            "exitCode": 0,
-            "targetGatePassed": True,
-            "operation": {"ok": True},
-        }
-        snapshots = 0
-        native_calls: list[str] = []
+        for leaf in (
+            "passes23.sqlite-journal",
+            "passes23.sqlite-wal",
+            "passes23.sqlite-shm",
+        ):
+            with self.subTest(leaf=leaf):
+                with (
+                    patch.object(apply_card_skin, "native") as native,
+                    patch.object(apply_card_skin, "run_json") as airtraffic,
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "unsupported extraction target",
+                    ),
+                ):
+                    apply_card_skin.extract_file(
+                        "device",
+                        apply_card_skin.WALLET_DB_TARGET,
+                        leaf,
+                        f"/tmp/{leaf}",
+                    )
 
-        def fake_native(command, *args):
-            nonlocal snapshots
-            native_calls.append(command)
-            if command == "snapshot-books":
-                snapshots += 1
-            if command == "extract":
-                return {
-                    "exitCode": 2,
-                    "targetGatePassed": True,
-                    "operation": {
-                        "ok": False,
-                        "reason": "file not found",
-                    },
-                }
-            if command == "finish-extract":
-                return {
-                    "exitCode": 0,
-                    "targetGatePassed": True,
-                    "operation": {
-                        "ok": True,
-                        "recoveredAbsent": True,
-                    },
-                }
-            return successful_operation
-
-        with tempfile.TemporaryDirectory() as temporary:
-            with (
-                patch.object(
-                    apply_card_skin,
-                    "native",
-                    side_effect=fake_native,
-                ),
-                patch.object(
-                    apply_card_skin,
-                    "run_json",
-                    return_value={"exitCode": 0, "ok": True},
-                ),
-                self.assertRaisesRegex(
-                    FileNotFoundError,
-                    "passes23.sqlite-journal file not found",
-                ),
-            ):
-                apply_card_skin.extract_file(
-                    "device",
-                    apply_card_skin.WALLET_DB_TARGET,
-                    "passes23.sqlite-journal",
-                    str(Path(temporary) / "journal"),
-                    retries=3,
-                    raise_errors=True,
-                )
-
-        self.assertEqual(snapshots, 1)
-        self.assertIn("finish-extract", native_calls)
+                native.assert_not_called()
+                airtraffic.assert_not_called()
 
     def test_extract_file_treats_post_relocation_main_not_found_as_failure(
         self,
