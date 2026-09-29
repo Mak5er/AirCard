@@ -34,6 +34,7 @@ struct CardItem: Identifiable, Hashable {
 
 enum AppTab: String, CaseIterable, Identifiable {
     case walletCards = "Apple Wallet"
+    case nfcCards = "NFC Cards"
     case passcodeThemes = "Passcode (.passthm)"
     var id: String { rawValue }
 }
@@ -1447,6 +1448,7 @@ struct WalletCardView: View {
     let onPickImage: () -> Void
     let onClearImage: () -> Void
     let onDelete: () -> Void
+    var showsCardHash: Bool = true
     
     @State private var isHovered = false
     @State private var isTargeted = false
@@ -1622,28 +1624,30 @@ struct WalletCardView: View {
                     .font(.system(size: 12, weight: .semibold))
                 
                 // Monospace Hash Pill with Copy
-                HStack(spacing: 4) {
-                    Text(card.id.prefix(8) + "…" + card.id.suffix(6))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
+                if showsCardHash {
+                    HStack(spacing: 4) {
+                        Text(card.id.prefix(8) + "…" + card.id.suffix(6))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
                     
-                    Button(action: {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(card.id, forType: .string)
-                        copied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                    }) {
-                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 9))
-                            .foregroundColor(copied ? .green : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(copied ? "Copied!" : "Copy full hash")
+                        Button(action: {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(card.id, forType: .string)
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                        }) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 9))
+                                .foregroundColor(copied ? .green : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(copied ? "Copied!" : "Copy full hash")
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)
                 .background(Color(NSColor.controlBackgroundColor))
                 .cornerRadius(6)
+                }
                 
                 Spacer()
                 
@@ -1687,6 +1691,7 @@ struct ContentView: View {
     @State private var dragKeyStartOffsets: [String: CGPoint] = [:]
     @State private var isTargetedPoster = false
     @State private var isTargetedTheme = false
+    @State private var nfcCards: [NFCCardItem] = [NFCCardItem(), NFCCardItem()]
     
     private var readyToFlashCount: Int {
         vm.cards.filter { $0.isSelected && $0.customImageURL != nil }.count
@@ -1704,19 +1709,21 @@ struct ContentView: View {
             Divider()
             
             // 2. Control Toolbar (Unified across tabs to prevent resizing/jumping)
-            Group {
-                if vm.selectedTab == .walletCards {
-                    toolbarView
-                } else {
-                    passcodeToolbarView
+            if vm.selectedTab != .nfcCards {
+                Group {
+                    if vm.selectedTab == .walletCards {
+                        toolbarView
+                    } else {
+                        passcodeToolbarView
+                    }
                 }
+                .frame(height: 48)
+                .padding(.horizontal, 20)
+                .background(Color(NSColor.windowBackgroundColor))
+
+                Divider()
             }
-            .frame(height: 48)
-            .padding(.horizontal, 20)
-            .background(Color(NSColor.windowBackgroundColor))
-            
-            Divider()
-            
+
             // 3. Live Scanner Notice Banner (if active)
             if vm.selectedTab == .walletCards && vm.isScanningCards {
                 scanningNoticeBanner
@@ -1748,6 +1755,8 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if vm.selectedTab == .nfcCards {
+                NFCCardsView(items: $nfcCards)
             } else {
                 passcodeThemeWorkspaceView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1762,12 +1771,14 @@ struct ContentView: View {
             Divider()
             
             // 6. Bottom Action & Status Bar
-            bottomBarView
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(Color(NSColor.controlBackgroundColor))
+            if vm.selectedTab != .nfcCards {
+                bottomBarView
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color(NSColor.controlBackgroundColor))
+            }
         }
-        .frame(minWidth: 880, minHeight: 680)
+        .frame(minWidth: 1040, minHeight: 720)
         .alert("Success!", isPresented: $vm.showSuccessAlert) {
             Button("OK") {}
         } message: {
@@ -1784,7 +1795,7 @@ struct ContentView: View {
             addCardSheet
         }
         .onChange(of: vm.selectedTab) { _, newTab in
-            if newTab == .passcodeThemes && vm.isScanningCards {
+            if newTab != .walletCards && vm.isScanningCards {
                 vm.stopCardScanning()
             }
             if vm.statusText.contains("Double-click Side button") {
@@ -1829,7 +1840,7 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .controlSize(.regular)
-            .frame(width: 290)
+            .frame(width: 420)
             
             Spacer()
             

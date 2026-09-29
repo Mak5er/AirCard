@@ -8,3 +8,13 @@ build/
 .tmp/
 *.dmg
 .serena/
+
+# Local NFC pass exports and signing material
+*.pem
+*.cer
+*.der
+*.p12
+*.pfx
+*.csr
+*.certSigningRequest
+*.pkpass

@@ -11,6 +11,7 @@
 ---
 
 ## Features
+- **NFC Wallet pass export (experimental):** Prepare artwork and pass data, generate a signing key/CSR, import certificates and export signed passes. Requires Apple NFC authorization for installation and a compatible VAS reader for contactless use. See [setup and limitations](docs/NFC_PASSES.md).
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Wallet cards.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular `.passthm` themes directly to iOS 18+ lockscreen.
 - 🧩 **Passcode Theme Creator:** Create custom themes from a single wallpaper (Seamless Poster Slicing) or build key-by-key (Individual Keys).
@@ -114,3 +115,7 @@ If you find AirCard useful, you can support future development:
 - **TON**: `UQBm9KPhtMw-XVVjirUoa09wzrlyWsbeZhKfefl1Uw-qNZ-r`
 - **USDT (TRC20)**: `TDkDMCyjYxgvkWUnQiF5Erk2RyPQMT6G1n`
 - **USDT / BNB (BEP20)**: `0x0954dc491c502849d04956ef74634aa5931a08e8`
+
+### NFC pass extension
+
+NFC pass export contributed by [Efe Bagri (@efebagri)](https://github.com/efebagri). Build from source to try this extension; live Wallet installation and NFC reader operation have not been validated.
