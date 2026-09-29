@@ -89,11 +89,7 @@ def find_device_helper() -> str | None:
 
 
 def list_devices() -> list[dict]:
-    """Enumerates paired devices reachable over USB.
-
-    Wi-Fi-paired devices can appear here too, and an entry whose session could
-    not be opened is reported with an empty `product`.
-    """
+    """Enumerates paired devices reachable over USB."""
     helper = find_device_helper()
     if not helper:
         return []
@@ -115,17 +111,17 @@ def list_devices() -> list[dict]:
 
 
 def get_connected_device() -> dict | None:
-    """Picks the connected iPhone out of the enumerated devices."""
-    usable = [d for d in list_devices() if d.get("udid") and d.get("product")]
-    if not usable:
+    """Picks a USB-connected iPhone, never a Wi-Fi-paired device."""
+    iphones = [
+        device
+        for device in list_devices()
+        if device.get("usb")
+        and device.get("udid")
+        and str(device.get("product", "")).startswith("iPhone")
+    ]
+    if not iphones:
         return None
-    # Enumeration order is not stable, and iPads can appear alongside the iPhone.
-    # A Wi-Fi-paired device can be listed first while the one actually plugged in
-    # comes later, so prefer USB-attached devices before anything else.
-    usb = [d for d in usable if d.get("usb")]
-    pool = usb or usable
-    iphones = [d for d in pool if str(d["product"]).startswith("iPhone")]
-    device = (iphones or pool)[0]
+    device = iphones[0]
 
     return {
         "udid": device["udid"],
