@@ -453,6 +453,72 @@ static NSData *AFCReadFile(AFCConnectionRef afc, NSString *path) {
     return AFCReadFileWithLimit(afc, path, 16 * 1024 * 1024);
 }
 
+static BOOL IsSafeListPath(NSString *path) {
+    // Library listings need sub-paths, so only traversal escapes are rejected.
+    // A trailing slash is allowed because it forces symlink resolution, which
+    // is how a relocated link is proven to still point at its directory.
+    if ([path hasPrefix:@"/"]) return NO;
+    if (!path.length) return YES;
+    NSMutableArray<NSString *> *components =
+        [[path componentsSeparatedByString:@"/"] mutableCopy];
+    if ([components.lastObject isEqual:@""]) [components removeLastObject];
+    if (!components.count) return NO;
+    for (NSString *component in components) {
+        if (!component.length || [component isEqual:@".."]) return NO;
+    }
+    return YES;
+}
+
+static NSString *AFCFileLinkTarget(AFCConnectionRef afc, NSString *path) {
+    AFCKeyValueRef info = NULL;
+    if (AFCFileInfoOpen(afc, path.fileSystemRepresentation, &info) != 0 ||
+        !info) return nil;
+    NSString *target = nil;
+    char *key = NULL;
+    char *value = NULL;
+    while (AFCKeyValueRead(info, &key, &value) == 0 && key && value) {
+        if (strcmp(key, "st_linktarget") == 0 ||
+            strcmp(key, "LinkTarget") == 0) {
+            target = [NSString stringWithUTF8String:value];
+        }
+        key = NULL;
+        value = NULL;
+    }
+    AFCKeyValueClose(info);
+    return target;
+}
+
+static NSInteger AFCFileInfoStatus(AFCConnectionRef afc, NSString *path) {
+    AFCKeyValueRef info = NULL;
+    int status = AFCFileInfoOpen(afc, path.fileSystemRepresentation, &info);
+    if (info) AFCKeyValueClose(info);
+    return status;
+}
+
+static NSDictionary *StatPath(AFCConnectionRef afc, NSString *path) {
+    if (!IsSafeListPath(path) || !path.length) {
+        return @{ @"ok": @NO, @"error": @"unsafe media path" };
+    }
+    NSString *kind = AFCFileKind(afc, path);
+    long long size = AFCFileSize(afc, path);
+    if (!kind && size < 0) {
+        // AFC status distinguishes "no such path" from a sandbox denial, which
+        // matters because Wallet's own database is readable-metadata denied.
+        NSInteger status = AFCFileInfoStatus(afc, path);
+        return @{ @"ok": @NO,
+                  @"error": status == 0 ? @"missing" : @"denied-or-missing",
+                  @"afcStatus": @(status),
+                  @"path": path };
+    }
+    NSMutableDictionary *result = [@{ @"ok": @YES,
+                                      @"path": path,
+                                      @"kind": kind ?: @"unknown",
+                                      @"size": @(size) } mutableCopy];
+    NSString *target = AFCFileLinkTarget(afc, path);
+    if (target.length) result[@"target"] = target;
+    return result;
+}
+
 static BOOL AFCWriteFile(AFCConnectionRef afc, NSString *path, NSData *data) {
     AFCFileRef file = NULL;
     int status = AFCFileRefOpen(afc, path.fileSystemRepresentation, 3, &file);
@@ -1025,6 +1091,36 @@ static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *ar
               @"booksRestore": booksRestore };
 }
 
+// Added alongside the read-only lookup helpers: identical to the cleanup
+// FinishWrite performs, except the relocated link is deliberately left in place.
+static NSDictionary *FinishKeepLink(DeviceSession *session, NSArray<NSString *> *args) {
+    NSString *source = args[0];
+    NSString *recovered = args[2];
+    NSString *snapshotRoot = args[3];
+    NSMutableArray<NSString *> *failures = NSMutableArray.array;
+
+    if (!RemoveIfPresent(session->afc, recovered))
+        [failures addObject:@"recovered file"];
+    if (!RemoveGeneratedTree(session->afc, source, 0))
+        [failures addObject:@"StreamingZip tree"];
+    sleep(2);
+    NSDictionary *booksRestore = RestoreBooksState(session->afc, snapshotRoot);
+    BOOL booksRestored = [booksRestore[@"ok"] boolValue];
+    if (!booksRestored) [failures addObject:@"Books preimage"];
+
+    BOOL sourceAbsent = !AFCExists(session->afc, source);
+    BOOL recoveredAbsent = !AFCExists(session->afc, recovered);
+    BOOL cleanupComplete = failures.count == 0 && sourceAbsent && recoveredAbsent && booksRestored;
+    return @{ @"ok": @(cleanupComplete),
+              @"cleanupComplete": @(cleanupComplete),
+              @"failures": failures,
+              @"linkKept": @YES,
+              @"sourceAbsent": @(sourceAbsent),
+              @"recoveredAbsent": @(recoveredAbsent),
+              @"booksPreimageRestored": @(booksRestored),
+              @"booksRestore": booksRestore };
+}
+
 static NSDictionary *FinishMovedRemoval(DeviceSession *session, NSArray<NSString *> *args) {
     NSString *source = args[0];
     NSString *linkDestination = args[1];
@@ -1140,6 +1236,16 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[5]],
                     [NSString stringWithUTF8String:argv[6]],
                 ]);
+            } else if ([command isEqual:@"finish-keep-link"] && argc == 7) {
+                // Added for the read-only card-artwork lookup: same cleanup as
+                // finish-write, but the relocated symlink stays in Media so later
+                // stat calls reuse it. Upstream FinishWrite is unchanged.
+                operation = FinishKeepLink(&session, @[
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                    [NSString stringWithUTF8String:argv[6]],
+                ]);
             } else if ([command isEqual:@"finish-moved-removal"] && argc == 8) {
                 operation = FinishMovedRemoval(&session, @[
                     [NSString stringWithUTF8String:argv[3]],
@@ -1162,6 +1268,23 @@ int main(int argc, const char *argv[]) {
                                    @"size": @(data.length),
                                    @"path": mediaPath };
                 }
+            } else if ([command isEqual:@"afc-stat"] && argc == 4) {
+                operation = StatPath(
+                    session.afc,
+                    [NSString stringWithUTF8String:argv[3]]);
+            } else if ([command isEqual:@"afc-stat-many"] && argc >= 4) {
+                NSMutableArray *present = [NSMutableArray array];
+                NSMutableDictionary *results = [NSMutableDictionary dictionary];
+                for (int index = 3; index < argc; index++) {
+                    NSString *path = [NSString stringWithUTF8String:argv[index]];
+                    NSDictionary *stat = StatPath(session.afc, path);
+                    results[path] = stat;
+                    if ([stat[@"ok"] boolValue]) [present addObject:path];
+                }
+                operation = @{ @"ok": @YES,
+                               @"count": @(argc - 3),
+                               @"present": present,
+                               @"results": results };
             }
         }
 

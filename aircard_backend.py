@@ -12,8 +12,11 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Augment PATH so bundled tools and system tools are always found
 script_dir = Path(__file__).resolve().parent
@@ -41,8 +44,13 @@ for lp in lib_paths:
         os.environ["DYLD_LIBRARY_PATH"] = f"{lp}:{cur_dyld}" if cur_dyld else lp
 
 from apply_card_skin import (
+    file_service_available,
+    read_files_batch,
     native,
     operation_ok,
+    read_file,
+    release_stat_link,
+    stat_paths,
     write_file,
     write_files_batch,
     remove_files,
@@ -51,6 +59,16 @@ from apply_card_skin import (
     DEVICE_HELPER,
 )
 from card_assets import CACHE_FILES, build_card_assets
+from card_assets import png_dimensions
+from card_artwork import (
+    detect_asset_format,
+    CARD_ARTWORK_MANIFEST,
+    declared_checks,
+    download_asset,
+    manifest_entries,
+    ordered_assets,
+    verify_declared,
+)
 from aircard import (
     find_device_helper,
     get_connected_device,
@@ -58,6 +76,10 @@ from aircard import (
     load_saved_cards,
     save_cards,
 )
+
+
+#: Where Wallet keeps one ".pkpass" bundle per verified card.
+CARDS_ROOT = "/var/mobile/Library/Passes/Cards"
 
 
 def cmd_device(target_udid: str | None = None):
@@ -295,6 +317,307 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
     }))
     sys.stdout.flush()
     return True
+
+
+def cmd_release_artwork_link(udid: str) -> bool:
+    """Remove the kept read-only symlink from the phone's Media folder."""
+    try:
+        release_stat_link(udid, CARDS_ROOT)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        print(json.dumps({"ok": False, "error": "Could not remove the lookup link"}))
+        return False
+    print(json.dumps({"ok": True}))
+    return True
+
+
+def cmd_probe_card_artwork(udid: str, card_ids: list) -> bool:
+    """Report which cards expose a remote card-artwork manifest.
+
+    Only these cards can download their original card artwork, so the GUI shows the
+    download button for them alone. Stats a fixed, per-ID allowlist through a
+    relocated symlink; no Wallet file is opened, moved or rewritten.
+    """
+    wanted = [
+        card for card in card_ids
+        if re.fullmatch(r"[-A-Za-z0-9_+=]{20,64}", card)
+    ]
+    if not wanted:
+        print(json.dumps({"ok": True, "available": [], "checked": 0}))
+        return True
+
+    names = [f"{card}.pkpass/{CARD_ARTWORK_MANIFEST}" for card in wanted]
+    try:
+        results = stat_paths(udid, CARDS_ROOT, names, retries=3)
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+        results = {}
+
+    if not results:
+        # The device lookup itself failed. Reporting an empty list here would
+        # silently hide every download button, so callers treat it as an error.
+        if not file_service_available(udid):
+            message = ("The iPhone's file service is unavailable, which usually means "
+                       "it is locked. Unlock it, keep the screen on, and try again.")
+        else:
+            message = "Could not read card artwork state from the iPhone. Reconnect and try again."
+        print(json.dumps({
+            "ok": False,
+            "error": message,
+            "checked": len(wanted),
+            "resolved": 0,
+        }))
+        return False
+
+    def _eligible(name: str) -> bool:
+        entry = results.get(name) or {}
+        if entry.get("present"):
+            return True
+        # AFC status 10 is a sandbox denial: the manifest cannot be ruled out,
+        # and the download path reads it through AirTraffic instead of AFC.
+        return entry.get("afcStatus") == 10
+
+    available = [card for card, name in zip(wanted, names) if _eligible(name)]
+    print(json.dumps({
+        "ok": True,
+        "available": available,
+        "checked": len(wanted),
+        "resolved": len(results),
+    }))
+    return True
+
+
+def resolve_card_artwork(manifest: bytes) -> dict:
+    """Pick the best declared asset, download it and check it against the manifest.
+
+    Returns {"ok": True, image, asset, host, verified, problems, attempted,
+    width, height} or {"ok": False, error, attempted}. Shared by the single-card
+    and the batch download so both behave identically.
+    """
+    entries = manifest_entries(manifest)
+    if not entries:
+        return {"ok": False,
+                "error": "The card's artwork manifest did not contain a usable URL.",
+                "attempted": []}
+
+    # Try the declared assets best-first: a failing @3x must not stop @2x, and a
+    # download whose bytes contradict the manifest is retried on the next asset.
+    attempts = []
+    unverified = None
+    image = None
+    asset = None
+    declared = None
+    problems = []
+    host = ""
+    for name in ordered_assets(entries):
+        meta = entries.get(name) or {}
+        url = meta.get("url")
+        if not url:
+            continue
+        try:
+            candidate = download_asset(url)
+        except urllib.error.HTTPError as error:
+            attempts.append(f"{name}: HTTP {error.code}")
+            continue
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            attempts.append(f"{name}: {error}")
+            continue
+
+        found = verify_declared(candidate, meta.get("size"), meta.get("sha1"))
+        if found:
+            attempts.append(f"{name}: {'; '.join(found)}")
+            if unverified is None:
+                unverified = (name, candidate, meta, found, urlparse(url).hostname or "")
+            continue
+        image, asset, declared, problems = candidate, name, meta, []
+        host = urlparse(url).hostname or ""
+        break
+
+    if image is None and unverified is not None:
+        # Nothing matched its declaration; keep the bytes but say so.
+        asset, image, declared, problems, host = unverified
+
+    if image is None:
+        return {"ok": False,
+                "error": "Could not download the card artwork: " + ("; ".join(attempts) or "no usable URL"),
+                "attempted": attempts}
+
+    extension = detect_asset_format(image)
+    if not extension:
+        return {"ok": False,
+                "error": ("Apple's asset service did not return a usable image "
+                          "(PNG, PDF, JPEG or GIF expected)."),
+                "asset": asset, "attempted": attempts}
+
+    size = png_dimensions(image)  # None for anything that is not a PNG
+    declared_any = declared_checks(declared.get("size"), declared.get("sha1"))
+    return {
+        "ok": True,
+        # Exactly the bytes Apple served: no format conversion on the way out.
+        "data": image,
+        "asset": asset,
+        "extension": extension,
+        "host": host,
+        # "verified" only claims something when the manifest declared size/sha1.
+        "verified": bool(declared_any and not problems),
+        "problems": problems,
+        "attempted": attempts,
+        "width": size[0] if size else None,
+        "height": size[1] if size else None,
+    }
+
+
+def _valid_card_hash(card_hash: str) -> bool:
+    return bool(re.fullmatch(r"[-A-Za-z0-9_+=]{20,64}", card_hash))
+
+
+def cmd_fetch_card_artwork(udid: str, card_hash: str, output_path: str) -> bool:
+    """Download the original card face named by the card's remote asset manifest."""
+    if not _valid_card_hash(card_hash):
+        print(json.dumps({"ok": False, "error": "Invalid card ID"}))
+        return False
+
+    destination = Path(output_path).expanduser()
+    if not destination.parent.is_dir():
+        print(json.dumps({"ok": False, "error": "Export folder does not exist"}))
+        return False
+
+    try:
+        # read_files_batch writes every manifest back in the same cycle, so one
+        # card costs one device round trip and the pass cannot lose the file.
+        manifests = read_files_batch(udid, CARDS_ROOT,
+                                     [f"{card_hash}.pkpass/{CARD_ARTWORK_MANIFEST}"], retries=2)
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+        manifests = {}
+    manifest = manifests.get(f"{card_hash}.pkpass/{CARD_ARTWORK_MANIFEST}")
+
+    if not manifest:
+        if not file_service_available(udid):
+            print(json.dumps({
+                "ok": False,
+                "error": ("The iPhone's file service is unavailable, so the pass "
+                          "cannot be read. Unlock the iPhone, keep the screen on, "
+                          "and try again."),
+            }))
+        else:
+            print(json.dumps({
+                "ok": False,
+                "error": ("This card has no remote card artwork on the iPhone. "
+                          "Open it once in Wallet (Apple Pay) and try again."),
+            }))
+        return False
+
+    resolved = resolve_card_artwork(manifest)
+    if not resolved["ok"]:
+        print(json.dumps({"ok": False, "error": resolved["error"],
+                          "attempted": resolved.get("attempted", [])}))
+        return False
+
+    try:
+        destination.write_bytes(resolved["data"])
+    except OSError as error:
+        print(json.dumps({"ok": False, "error": f"Could not save image: {error}"}))
+        return False
+
+    print(json.dumps({
+        "ok": True,
+        "source": f"remote/{resolved['host']}",
+        "asset": resolved["asset"],
+        "extension": resolved["extension"],
+        "verified": resolved["verified"],
+        "problems": resolved["problems"],
+        "attempted": resolved["attempted"],
+        "bytes": len(resolved["data"]),
+        "width": resolved["width"],
+        "height": resolved["height"],
+        "path": str(destination),
+    }))
+    return True
+
+
+def cmd_fetch_card_artworks(udid: str, output_directory: str, card_hashes: list) -> bool:
+    """Download the original artwork of several cards in one device round trip.
+
+    All manifests are read in a single move cycle, then each cover is fetched and
+    verified by the same code path the single-card command uses. One failing card
+    never stops the others.
+    """
+    cards = [card for card in card_hashes if _valid_card_hash(card)]
+    if not cards:
+        print(json.dumps({"ok": False, "error": "Invalid card ID"}))
+        return False
+    if len(cards) != len(card_hashes):
+        print(json.dumps({"ok": False, "error": "Invalid card ID"}))
+        return False
+
+    directory = Path(output_directory).expanduser()
+    if not directory.is_dir():
+        print(json.dumps({"ok": False, "error": "Export folder does not exist"}))
+        return False
+
+    leaves = [f"{card}.pkpass/{CARD_ARTWORK_MANIFEST}" for card in cards]
+    try:
+        manifests = read_files_batch(udid, CARDS_ROOT, leaves, retries=2)
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+        manifests = {}
+
+    if not manifests and not file_service_available(udid):
+        print(json.dumps({
+            "ok": False,
+            "error": ("The iPhone's file service is unavailable, so the passes cannot be "
+                      "read. Unlock the iPhone, keep the screen on, and try again."),
+        }))
+        return False
+
+    results = []
+    saved = 0
+    for card in cards:
+        entry = {"card": card}
+        manifest = manifests.get(f"{card}.pkpass/{CARD_ARTWORK_MANIFEST}")
+        if not manifest:
+            entry.update({"ok": False,
+                          "error": ("No readable artwork manifest for this card. Open it "
+                                    "once in Wallet (Apple Pay) and try again.")})
+            results.append(entry)
+            continue
+
+        resolved = resolve_card_artwork(manifest)
+        if not resolved["ok"]:
+            entry.update({"ok": False, "error": resolved["error"],
+                          "attempted": resolved.get("attempted", [])})
+            results.append(entry)
+            continue
+
+        path = directory / f"AirCard-{card[:12]}{resolved['extension']}"
+        try:
+            path.write_bytes(resolved["data"])
+        except OSError as error:
+            entry.update({"ok": False, "error": f"Could not save image: {error}"})
+            results.append(entry)
+            continue
+
+        saved += 1
+        entry.update({
+            "ok": True,
+            "source": f"remote/{resolved['host']}",
+            "asset": resolved["asset"],
+            "extension": resolved["extension"],
+            "verified": resolved["verified"],
+            "problems": resolved["problems"],
+            "bytes": len(resolved["data"]),
+            "width": resolved["width"],
+            "height": resolved["height"],
+            "path": str(path),
+        })
+        results.append(entry)
+
+    print(json.dumps({
+        "ok": saved > 0,
+        "saved": saved,
+        "failed": len(cards) - saved,
+        "checked": len(cards),
+        "results": results,
+        "error": "" if saved else "No card artwork could be downloaded.",
+    }))
+    return saved > 0
 
 
 KEYPAD_SUBTEXTS = {
@@ -654,6 +977,18 @@ def main():
         cmd_prepare_image(sys.argv[2], sys.argv[3])
     elif norm_cmd == "flash" and len(sys.argv) > 4:
         if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4]):
+            sys.exit(1)
+    elif norm_cmd == "release-artwork-link" and len(sys.argv) > 2:
+        if not cmd_release_artwork_link(sys.argv[2]):
+            sys.exit(1)
+    elif norm_cmd == "probe-card-artwork" and len(sys.argv) > 3:
+        if not cmd_probe_card_artwork(sys.argv[2], sys.argv[3:]):
+            sys.exit(1)
+    elif norm_cmd == "fetch-card-artworks" and len(sys.argv) > 4:
+        if not cmd_fetch_card_artworks(sys.argv[2], sys.argv[3], sys.argv[4:]):
+            sys.exit(1)
+    elif norm_cmd == "fetch-card-artwork" and len(sys.argv) > 4:
+        if not cmd_fetch_card_artwork(sys.argv[2], sys.argv[3], sys.argv[4]):
             sys.exit(1)
     elif norm_cmd == "inspect-passthm" and len(sys.argv) > 2:
         cmd_inspect_passthm(sys.argv[2])
