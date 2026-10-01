@@ -31,7 +31,7 @@ Wallet setup, detailed troubleshooting, multi-card workflows, theme creation, co
 - [English getting-started guide](docs/guides/README.en.md)
 - [Card artwork and source notes](assets/skins/README.md)
 - [Offline card artwork editor](tools/card-artwork/README.md) — download a single HTML file, frame an image locally, and export a 1536 × 969 PNG
-
+- [Card Templates](https://cardart.cc/) — browse templates for creating custom card skins from pre-made designs
 ---
 
 ## Installation
