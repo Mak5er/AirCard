@@ -73,6 +73,7 @@ cp apply_card_skin.py "$RESOURCES_DIR/"
 cp aircard.py "$RESOURCES_DIR/"
 cp aircard_backend.py "$RESOURCES_DIR/"
 cp card_assets.py "$RESOURCES_DIR/"
+cp card_artwork.py "$RESOURCES_DIR/"
 cp wallet_catalog.py "$RESOURCES_DIR/"
 
 # A bundle without these cannot talk to a device at all, so fail here instead

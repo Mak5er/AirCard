@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ PNG_ASSET_NAMES: Final = (
 )
 PDF_ASSET_NAME: Final = "cardBackgroundCombined.pdf"
 CACHE_FILES: Final = ("FrontFace", "PlaceHolder", "Preview")
+PNG_SIGNATURE: Final = b"\x89PNG\r\n\x1a\n"
 
 
 def build_card_assets(png_bytes: bytes) -> tuple[tuple[str, bytes], ...]:
@@ -37,3 +39,15 @@ def build_card_assets(png_bytes: bytes) -> tuple[tuple[str, bytes], ...]:
 
     png_assets = tuple((name, png_bytes) for name in PNG_ASSET_NAMES)
     return (*png_assets, (PDF_ASSET_NAME, pdf_bytes))
+
+
+def is_png(data: bytes) -> bool:
+    """True when the payload starts with the PNG signature."""
+    return data.startswith(PNG_SIGNATURE)
+
+
+def png_dimensions(data: bytes) -> "tuple[int, int] | None":
+    """Width and height of a PNG payload, or None when it is not a PNG."""
+    if len(data) < 24 or not is_png(data) or data[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", data[16:24])
