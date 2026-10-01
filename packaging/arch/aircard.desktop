@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AirCard
+Comment=Customize Apple Wallet artwork and iPhone passcode themes
+Comment[pt_BR]=Personalize imagens do Apple Wallet e temas de senha do iPhone
+Exec=aircard-gui
+Icon=phone
+Terminal=false
+Categories=Graphics;
+Keywords=iPhone;Wallet;Apple;card;theme;
+StartupNotify=true

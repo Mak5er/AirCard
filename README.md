@@ -2,6 +2,7 @@
 
 > **Apple Wallet Card Skinner & Lockscreen Passcode Themer (No Jailbreak Required)**  
 > **Supports iOS 18.0 – 27.0.1 & iOS 27.2 beta 1–2** (iOS 27.2 beta 3+ patched)  
+> **Linux (Arch):** a native GUI + CLI and a `PKGBUILD` are included — see [installation and usage on Arch Linux](docs/linux/ARCHLINUX.md). The Linux client is based on [shinkuan/AirCard-Linux](https://github.com/shinkuan/AirCard-Linux) ([attribution](docs/linux/ATTRIBUTION.md)).
 > Powered by the `airlift` AirTraffic sync exploit.
 
 <p align="left">

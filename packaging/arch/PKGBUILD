@@ -1,0 +1,51 @@
+# Maintainer: FabioLukas123
+pkgname=aircard-git
+pkgver=0.1.0.r0
+pkgrel=1
+pkgdesc='Apple Wallet artwork and passcode theme client for Linux (GUI and CLI)'
+arch=('x86_64')
+url='https://github.com/Mak5er/AirCard'
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'usbmuxd' 'libxkbcommon' 'libglvnd' 'wayland'
+         'libx11' 'libxcursor' 'libxi' 'libxrandr' 'xdg-desktop-portal')
+makedepends=('cargo' 'git')
+optdepends=('libimobiledevice: pair and validate an iPhone with idevicepair'
+            'xdg-desktop-portal-gtk: file chooser backend for GTK desktops and Hyprland'
+            'xdg-desktop-portal-kde: file chooser backend for KDE')
+provides=('aircard')
+conflicts=('aircard')
+options=('!debug' '!lto')
+source=("AirCard::git+$url.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/AirCard"
+    printf '0.1.0.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir/AirCard"
+    cargo fetch --locked
+}
+
+build() {
+    cd "$srcdir/AirCard"
+    cargo build --release --frozen --workspace
+}
+
+check() {
+    cd "$srcdir/AirCard"
+    cargo test --release --frozen --workspace
+}
+
+package() {
+    cd "$srcdir/AirCard"
+    local target_dir="${CARGO_TARGET_DIR:-target}"
+    install -Dm755 "$target_dir/release/aircard" "$pkgdir/usr/bin/aircard"
+    install -Dm755 "$target_dir/release/aircard-gui" "$pkgdir/usr/bin/aircard-gui"
+    install -Dm644 packaging/arch/aircard.desktop "$pkgdir/usr/share/applications/aircard.desktop"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 docs/linux/LICENSE.AirCard-Linux "$pkgdir/usr/share/licenses/$pkgname/LICENSE.AirCard-Linux"
+    install -Dm644 docs/linux/ARCHLINUX.md "$pkgdir/usr/share/doc/$pkgname/ARCHLINUX.md"
+    install -Dm644 docs/linux/ATTRIBUTION.md "$pkgdir/usr/share/doc/$pkgname/ATTRIBUTION.md"
+}

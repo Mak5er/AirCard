@@ -8,3 +8,11 @@ build/
 .tmp/
 *.dmg
 .serena/
+
+# Linux build and local development
+target/
+.venv/
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/*.pkg.tar.*
+packaging/arch/AirCard/

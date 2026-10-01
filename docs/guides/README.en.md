@@ -1,5 +1,9 @@
 # AirCard User Guide 🎴
 
+> **Using AirCard on Arch Linux?** Follow the [native Linux installation and
+> usage guide](../linux/ARCHLINUX.md). The DMG and Mac steps below apply to the
+> original macOS app.
+
 **Give your Apple Wallet cards a look you like.**
 
 [中文](README.zh-CN.md) · English · [Download AirCard](https://github.com/Mak5er/AirCard/releases/latest) · [Card artwork](#card-artwork)
