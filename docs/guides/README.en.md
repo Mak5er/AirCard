@@ -32,7 +32,7 @@ Original card artwork for this guide. Use the links below to download them. If G
 
 | Item | Details |
 | --- | --- |
-| Computer | A Mac; upstream provides a universal DMG for Apple Silicon and Intel |
+| Computer | macOS 14 (Sonoma) or later; upstream provides a universal DMG for Apple Silicon and Intel. macOS 12/13 cannot run this build. |
 | Phone | An iPhone; upstream advertises iOS 18+ without a jailbreak, but results depend on the device and OS version |
 | Connection | A USB data cable; keep the iPhone unlocked and trust the Mac |
 | Card | A card already added to Apple Wallet |
@@ -45,6 +45,8 @@ This guide was checked against **AirCard v1.2.6** on **2026-10-04**. The upstrea
 ### 1. Install AirCard
 
 Open the [official download page](https://github.com/Mak5er/AirCard/releases/latest) and download `AirCard.dmg` under **Assets**. Open it, drag `AirCard.app` into **Applications**, and launch the app.
+
+Check **Apple menu → About This Mac** first: this build requires **macOS 14 or later**. See the [release notes](../RELEASE_NOTES.md).
 
 If macOS blocks the first launch, verify that the file came from the original repository above, then follow the [upstream installation instructions](https://github.com/Mak5er/AirCard/blob/main/README.md#installation).
 
@@ -62,7 +64,29 @@ In AirCard, open **Apple Wallet** and click **Scan Cards**. On the iPhone:
 
 Wait for the card to appear in AirCard on the Mac.
 
+#### Alternative scanning methods
+
+You can also open the **Wallet app** directly and tap or switch to the desired
+card while scanning. Some users report this is sufficient; passes and
+memberships may need opening in Wallet. Keep the normal side-button workflow
+available because results depend on the device, iOS version, and card.
+
+For a missing **supported transit card**, a [reported workaround in issue #25](https://github.com/Mak5er/AirCard/issues/25)
+is **Wallet → card → More (…) → Card Details → Turn on Service Mode**, then
+authenticate and scan. Start scanning before or immediately after enabling it,
+because Service Mode is temporary. This means **Wallet transit-card Service
+Mode**, not Developer Mode or iPhone repair/service diagnostics. The option is
+not available for every card, and the report is not a universal compatibility
+test. If unavailable, **Save IDs** can accept an identifier you already know.
+
+The app's **Scanning help** button beside **Scan Cards** contains these steps.
+
 ### 4. Choose an image
+
+Use **Artwork Tools** in the Wallet toolbar to open the bundled offline artwork
+editor or browse the independent AirCards community catalog. Export or download
+a PNG, then select it in AirCard. The editor runs locally in your browser and
+does not upload your image; the catalog is an external website.
 
 Download any PNG above. Click the target card in AirCard to select an image, or drag the image directly onto it. Check the preview and make sure you selected the intended card. You can assign a different image to each card.
 
@@ -94,7 +118,7 @@ AirCard center-crops to a landscape card shape. Prepare artwork at **1536 × 969
 
 ### Can I restore the original card artwork with one click?
 
-The current app does not provide a one-click restore workflow. **The × at the top right of a card (Remove skin)** only clears the image selected on the Mac; it does not restore artwork on the iPhone. If restoration is essential to you, check the current upstream documentation before applying a skin.
+The current app does not provide a one-click restore workflow. **The × at the top right of a card (Clear selected skin on this Mac)** only clears the image selected on the Mac; it does not restore artwork on the iPhone. **Clear All** clears this Mac's list and image selections. **Clear Theme** and the Theme Creator's **Clear All** clear local theme selections or artwork; they do not remove an applied passcode theme from the phone. If restoration is essential to you, check the current upstream documentation before applying a skin.
 
 ### Can I use Windows or run this directly on an iPhone?
 

@@ -1921,7 +1921,8 @@ struct WalletCardView: View {
                         }
                         .buttonStyle(.plain)
                         .padding(10)
-                        .help("Remove skin")
+                        .accessibilityLabel("Clear selected skin on this Mac")
+                        .help("Clear this Mac's selected image. This does not restore the original artwork on your iPhone.")
                         
                         // Hover overlay: Change Skin
                         if isHovered {
@@ -2123,6 +2124,7 @@ struct WalletCardView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Remove from list")
+                .accessibilityLabel("Remove card from this Mac's list")
             }
             .padding(.horizontal, 4)
         }
@@ -2205,6 +2207,8 @@ struct ContentView: View {
     @State private var dragKeyStartOffsets: [String: CGPoint] = [:]
     @State private var isTargetedPoster = false
     @State private var isTargetedTheme = false
+    @State private var showConnectionHelp = false
+    @State private var showScanningHelp = false
     
     private var readyToFlashCount: Int {
         vm.cards.filter { $0.isSelected && $0.customImageURL != nil }.count
@@ -2245,6 +2249,8 @@ struct ContentView: View {
             
             if vm.selectedTab == .walletCards {
                 WalletDiagnosticsView(vm: vm)
+                Divider()
+                walletCompatibilityView
                 Divider()
             }
 
@@ -2471,6 +2477,19 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .disabled(vm.isCheckingDevice || vm.isFlashing)
                 .help("Refresh device connection")
+
+                Button(action: { showConnectionHelp.toggle() }) {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Connection help")
+                .help("How to connect your iPhone")
+                .popover(isPresented: $showConnectionHelp) {
+                    connectionHelpView
+                        .padding(20)
+                        .frame(width: 360)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -2492,6 +2511,65 @@ struct ContentView: View {
         .frame(height: 54)
     }
     
+    private var walletCompatibilityView: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label("Before flashing", systemImage: "info.circle")
+                .fontWeight(.semibold)
+            Text("Apple Card uses dynamic artwork rather than these static skins. Apple Cash remains unresolved. Apple Watch and Home Key support are unverified.")
+            Text("Clearing selections here does not restore artwork on your iPhone. Reopen Wallet after flashing to check the result.")
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+    }
+
+    private var connectionHelpView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Connect your iPhone", systemImage: "cable.connector")
+                .font(.headline)
+            Text("1. Connect directly to this Mac with a USB cable that supports data. If needed, try another cable or USB port.")
+            Text("2. Unlock your iPhone and keep its screen on.")
+            Text("3. Tap Trust This Computer on the iPhone if prompted, then enter its passcode. Allow the accessory on the Mac if asked.")
+            Text("4. Unplug and reconnect the cable, then click Reconnect below.")
+            Button(vm.isCheckingDevice ? "Checking iPhone…" : "Reconnect") {
+                vm.checkDevice()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(vm.isCheckingDevice || vm.isFlashing)
+            Text("Still missing? Open Log for the error and check the connection troubleshooting guide.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Link("Connection troubleshooting", destination: URL(string: "https://github.com/Mak5er/AirCard/blob/main/docs/guides/TROUBLESHOOTING.en.md")!)
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var scanningHelpView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Find your Wallet cards", systemImage: "creditcard.viewfinder")
+                .font(.headline)
+            Text("Start Scan Cards, then double-click the iPhone's Side button, authenticate, and tap or switch cards.")
+            Text("Alternative: open the Wallet app directly and tap the card. This can work on some devices; passes and memberships may need opening there.")
+            Divider()
+            Text("Transit card still missing? Reported workaround")
+                .fontWeight(.semibold)
+            Text("For a supported transit card, try Wallet → card → More (…) → Card Details → Turn on Service Mode, then authenticate. Start scanning before or immediately after enabling it: Service Mode is temporary.")
+            Text("This is Wallet transit-card Service Mode, not Developer Mode or iPhone repair mode. Availability and results depend on the card and iOS version; it is not a guaranteed fix.")
+                .foregroundStyle(.secondary)
+            Text("If Service Mode is unavailable, Save IDs lets you enter a card ID you already know.")
+            Link("Read the transit-card report", destination: URL(string: "https://github.com/Mak5er/AirCard/issues/25")!)
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(20)
+        .frame(width: 400)
+    }
+
     private var toolbarView: some View {
         HStack(spacing: 12) {
             // Live Scanner Toggle
@@ -2513,12 +2591,31 @@ struct ContentView: View {
             .tint(vm.isScanningCards ? .red : .blue)
             .controlSize(.regular)
             .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
+
+            Button(action: { showScanningHelp.toggle() }) {
+                Image(systemName: "questionmark.circle")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Scanning help")
+            .help("Alternative scanning methods and transit-card help")
+            .popover(isPresented: $showScanningHelp) {
+                scanningHelpView
+            }
             
             Button(action: { vm.showAddCardSheet = true }) {
                 Label("Save IDs", systemImage: "plus")
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
+
+            Menu {
+                Button("Open Offline Artwork Editor…", action: openArtworkEditor)
+                Link("Browse AirCards Catalog…", destination: URL(string: "https://aircards.org/")!)
+            } label: {
+                Label("Artwork Tools", systemImage: "photo")
+            }
+            .controlSize(.regular)
+            .help("Frame an image in the offline editor or browse the independent AirCards catalog. Import the downloaded PNG as a skin.")
             
             if !vm.cards.isEmpty {
                 Button(action: openBulkImagePicker) {
@@ -2559,6 +2656,7 @@ struct ContentView: View {
                     .buttonStyle(.link)
                     .font(.caption)
                     .foregroundColor(.red)
+                    .help("Clear this Mac's card list and image selections. This does not remove cards or restore artwork on your iPhone.")
                 }
             }
         }
@@ -2577,7 +2675,7 @@ struct ContentView: View {
                     .font(.caption)
                     .fontWeight(.bold)
                     .foregroundColor(.blue)
-                Text("Double-click Side button (Apple Pay), pass Face ID, then tap your card.")
+                Text("Double-click Side button, authenticate, and tap a card. Or open Wallet and tap it. See Scanning help for transit cards.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -2601,51 +2699,59 @@ struct ContentView: View {
                 .font(.system(size: 54))
                 .foregroundColor(.accentColor.opacity(0.8))
             
-            Text(vm.isScanningCards ? "Scanning for Cards…" : "No Cards Detected Yet")
+            Text(vm.device?.connected != true ? "No iPhone Connected" : vm.isScanningCards ? "Scanning for Cards…" : "No Cards Detected Yet")
                 .font(.title3)
                 .fontWeight(.bold)
             
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
-                    Text("1.")
-                        .fontWeight(.bold)
-                        .foregroundColor(.accentColor)
-                    Text(vm.isScanningCards ? "Scanner is active. Open Wallet on your iPhone." : "Click **Scan Cards** in the toolbar above.")
+            if vm.device?.connected != true {
+                connectionHelpView
+                    .frame(maxWidth: 460)
+                    .padding(20)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(12)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("1.")
+                            .fontWeight(.bold)
+                            .foregroundColor(.accentColor)
+                        Text(vm.isScanningCards ? "Scanner is active. Open Wallet on your iPhone." : "Click **Scan Cards** in the toolbar above.")
+                    }
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("2.")
+                            .fontWeight(.bold)
+                            .foregroundColor(.accentColor)
+                        Text("On your iPhone, **double-click the Side button**, authenticate, and **tap your card**. Alternatively, open the **Wallet app** and tap it.")
+                    }
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("3.")
+                            .fontWeight(.bold)
+                            .foregroundColor(.accentColor)
+                        Text("Detected cards appear as the iPhone reports them. For missing transit cards, open **Scanning help** beside Scan Cards.")
+                    }
                 }
-                HStack(alignment: .top, spacing: 10) {
-                    Text("2.")
-                        .fontWeight(.bold)
-                        .foregroundColor(.accentColor)
-                    Text("On your iPhone, **double-click the Side button** (Apple Pay), authenticate with **Face ID**, and **tap your card**.")
-                }
-                HStack(alignment: .top, spacing: 10) {
-                    Text("3.")
-                        .fontWeight(.bold)
-                        .foregroundColor(.accentColor)
-                    Text(vm.isScanningCards ? "Detected cards will appear here as the iPhone reports them." : "Your card will be detected immediately!")
-                }
-            }
-            .font(.subheadline)
-            .foregroundColor(.secondary)
-            .frame(maxWidth: 460)
-            .padding(20)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: 460)
+                .padding(20)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(12)
             
-            HStack(spacing: 12) {
-                Button(action: { vm.toggleCardScanning() }) {
-                    Label(vm.isCheckingDevice ? "Checking iPhone…" : vm.isScanningCards ? "Stop Scanning" : "Start Scanning", systemImage: "wave.3.forward.circle.fill")
-                        .fontWeight(.semibold)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-                .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
+                HStack(spacing: 12) {
+                    Button(action: { vm.toggleCardScanning() }) {
+                        Label(vm.isCheckingDevice ? "Checking iPhone…" : vm.isScanningCards ? "Stop Scanning" : "Start Scanning", systemImage: "wave.3.forward.circle.fill")
+                            .fontWeight(.semibold)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
                 
-                Button("Save IDs for Matching") {
-                    vm.showAddCardSheet = true
+                    Button("Save IDs for Matching") {
+                        vm.showAddCardSheet = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
             }
         }
         .padding(40)
@@ -2717,6 +2823,7 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundColor(.red)
                 .disabled(vm.loadedPasscodeTheme == nil)
+                .help("Clear the theme selected on this Mac. This does not remove the theme already applied to your iPhone.")
             } else {
                 Button("Clear All") {
                     vm.clearCreator()
@@ -2725,6 +2832,7 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundColor(.red)
                 .disabled(vm.effectiveCreatorKeys.isEmpty && vm.creatorPosterImage == nil)
+                .help("Clear the poster and keys in this Mac's theme creator. This does not remove the theme already applied to your iPhone.")
             }
         }
         .controlSize(.regular)
@@ -2848,7 +2956,11 @@ struct ContentView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.regular)
+                        .help("Clear this Mac's selected theme; the theme on your iPhone stays applied.")
                     }
+                    Text("Clearing the selection on this Mac does not remove the theme from your iPhone.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -4165,6 +4277,23 @@ struct ContentView: View {
         .frame(width: 440)
     }
     
+    private func openArtworkEditor() {
+        let candidates = [
+            Bundle.main.url(forResource: "card-artwork", withExtension: "html"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("tools/card-artwork/index.html"),
+            URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("tools/card-artwork/index.html")
+        ].compactMap { $0 }
+        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            vm.errorMessage = "The offline artwork editor is missing. Rebuild or reinstall AirCard to include it."
+            return
+        }
+        if !NSWorkspace.shared.open(url) {
+            vm.errorMessage = "AirCard could not open the artwork editor. Choose a default browser in macOS settings and try again."
+        }
+    }
+
     private func openCardImagePicker(for cardId: String) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]

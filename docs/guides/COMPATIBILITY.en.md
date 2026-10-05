@@ -28,6 +28,23 @@ The original report's macOS 26.2 screenshot is not the final validated environme
 
 **Not tested** means evidence is missing; it means neither success nor lack of support. Keep features separate. Exporting a theme on the Mac does not count as successfully flashing an iPhone.
 
+## Known limits and open reports
+
+Read these before flashing. Reports describe particular users' results, not a
+complete compatibility matrix.
+
+| Card / destination | Current guidance |
+| --- | --- |
+| Apple Card | Uses dynamic artwork instead of the static skin assets AirCard writes, as explained in the [README](../../README.md#how-to-customize-apple-wallet-cards). |
+| Apple Cash | Unresolved; [#148](https://github.com/Mak5er/AirCard/issues/148) reports that artwork could not be changed. Do not assume Apple Card's rendering explanation also applies to Apple Cash. |
+| Apple Watch | No confirmed support for syncing these skins to the Watch. [#118](https://github.com/Mak5er/AirCard/issues/118) reports iPhone success without a Watch update. |
+| Home Key | No confirmed skin support. [#10](https://github.com/Mak5er/AirCard/issues/10) reports a success message without a visible artwork change. |
+
+The Wallet workspace shows this guidance before the flash action. Completion
+of a write still requires checking the result in Wallet. Clearing a skin or
+theme selection on the Mac does not restore the phone's original artwork;
+there is no automatic rollback flow in this GUI.
+
 ## What counts as success at each stage?
 
 | Stage | Observable result needed for “successful” | What this does not establish |

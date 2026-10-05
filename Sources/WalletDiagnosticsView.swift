@@ -11,6 +11,9 @@ struct WalletDiagnosticsView: View {
     private var headerStatusText: String {
         let matched = vm.currentVerifiedCardIDs.count
         let hidden = max(0, vm.cards.count - matched)
+        if vm.device?.connected != true {
+            return "No iPhone connected. Open Connection help beside the device indicator."
+        }
         if vm.isScanningCards {
             return "Scanning iPhone Wallet…"
         }

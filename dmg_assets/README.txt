@@ -3,6 +3,8 @@
 ============================================================
 
 1. INSTALLATION:
+   Requires macOS 14 (Sonoma) or later, on Apple Silicon or Intel.
+   macOS 12 (Monterey) and 13 (Ventura) cannot run this build.
    Drag and drop the "AirCard" icon into the "Applications" folder.
 
 2. FIRST LAUNCH (macOS Gatekeeper):

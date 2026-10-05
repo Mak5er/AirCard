@@ -45,11 +45,19 @@ Wallet setup, detailed troubleshooting, multi-card workflows, theme creation, co
 - [Card artwork and source notes](assets/skins/README.md)
 - [Offline card artwork editor](tools/card-artwork/README.md) — download a single HTML file, frame an image locally, and export a 1536 × 969 PNG
 
+In the app, use **Artwork Tools → Open Offline Artwork Editor…** to launch the
+bundled editor in your browser, or **Browse AirCards Catalog…** to find community
+artwork. Export or download a PNG, then choose it as a card skin in AirCard.
+
 ---
 
 ## Installation
 
 ### macOS (Universal DMG)
+**Requires macOS 14 (Sonoma) or later**, on Apple Silicon or Intel. macOS 12
+(Monterey) and 13 (Ventura) cannot run this build. See the
+[release notes](docs/RELEASE_NOTES.md) for requirements and local changes.
+
 1. Download **`AirCard.dmg`** from [Releases](https://github.com/mak5er/AirCard/releases).
 2. Open `AirCard.dmg` and drag **`AirCard.app`** into your **Applications** folder.
 3. Fully compatible with both **Apple Silicon** and **Intel (x86)** Macs.
@@ -85,9 +93,21 @@ Wallet setup, detailed troubleshooting, multi-card workflows, theme creation, co
 5. Click **Flash Skins**.
 6. Force-close the **Wallet** app on your iPhone from the App Switcher (or reboot) to see your new custom card design!
 
+**Alternative scanning:** open the Wallet app directly and tap the desired card
+while AirCard is scanning. Results depend on the device and card. For a missing
+supported transit card, **Scanning help** beside Scan Cards explains the reported
+Wallet Service Mode workaround. See [alternative scanning methods](docs/guides/README.en.md#alternative-scanning-methods).
+
 > [!NOTE]
 > **Apple Card:**
 > The Apple Card (titanium/digital card) uses dynamic vector rendering based on your spending categories instead of static cached card skins. Custom skins apply to standard debit/credit cards, transit cards, and passes.
+
+**Before flashing:** Apple Cash remains unresolved ([#148](https://github.com/Mak5er/AirCard/issues/148)).
+Apple Watch artwork syncing ([#118](https://github.com/Mak5er/AirCard/issues/118))
+and Home Key skins ([#10](https://github.com/Mak5er/AirCard/issues/10)) have failure
+reports and no confirmed support here. Clearing image or theme selections on the
+Mac does not restore artwork already applied to the phone. See
+[compatibility limits](docs/guides/COMPATIBILITY.en.md#known-limits-and-open-reports).
 
 ### Card names and missing-card checks
 
