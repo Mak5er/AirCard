@@ -14,19 +14,19 @@ AirCard 是一款 macOS 工具，通过 USB 连接 iPhone，自定义 Apple Wall
 
 ## 卡面素材
 
-卡面素材原图，点击下方链接即可下载。GitHub 若打开了图片预览页，可点击 **Download raw file**，或打开 **Raw** 后保存图片。
+以下社区示例均为 1536 × 969 PNG，点击下方 Aircards.org 链接，在作品页点击 **下载** 即可保存图片。
 
-| 纸板信用卡 · Cardboard credit card | 极简 Apple 图案 · Minimal Apple artwork |
+| 趣味纸板信用卡 · American Depress | Apple Card 柔彩渐变 · Apple Card — Soft Gradient |
 | :---: | :---: |
-| <img src="../../assets/skins/cardboard-credit-card.png" alt="纸板质感卡面，印有 Official Credit Card 和 Trust Me 字样" width="400"> | <img src="../../assets/skins/apple-minimal.png" alt="浅灰背景中央的灰色 Apple 标志" width="300"> |
-| [下载 PNG 原图](../../assets/skins/cardboard-credit-card.png) · 1411 × 1008 | [下载 PNG 原图](../../assets/skins/apple-minimal.png) · 1080 × 1080 |
+| <img src="../../assets/skins/cardboard-credit-card.png" alt="纸板质感卡面，印有 Official Credit Card 和 Trust Me 字样" width="400"> | <img src="../../assets/skins/apple-minimal.png" alt="Apple Card 柔彩渐变卡面" width="400"> |
+| [American Depress · Aircards.org](https://aircards.org/en/community/a8b36946ea6940ceaa2ef4de0a01973f/) · 1536 × 969 | [Apple Card — Soft Gradient · Aircards.org](https://aircards.org/en/community/bca7203bbcf551aab8abccc5542bb29f/) · 1536 × 969 |
 
-| American Express 黑色卡面 · Amex black artwork | Trump Gold Card 金色卡面 · Trump Gold Card artwork |
+| 美国运通百夫长卡面 · American Express® Centurion Card | Trump Gold Card 金色卡面 · Trump Gold Card artwork |
 | :---: | :---: |
-| <img src="../../assets/skins/amex-black.png" alt="黑色 American Express 卡面图案，带芯片和百夫长头像" width="400"> | <img src="../../assets/skins/trump-gold-card.png" alt="金色 Trump Gold Card 图案，带特朗普肖像、自由女神像、鹰和 VISA 字样" width="400"> |
-| [下载 PNG 原图](../../assets/skins/amex-black.png) · 844 × 540 | [下载 PNG 原图](../../assets/skins/trump-gold-card.png) · 1536 × 969 |
+| <img src="../../assets/skins/amex-black.png" alt="黑色 American Express 百夫长卡面，带百夫长头像" width="400"> | <img src="../../assets/skins/trump-gold-card.png" alt="金色 Trump Gold Card 图案，带特朗普肖像、自由女神像和鹰" width="400"> |
+| [American Express® Centurion Card · Aircards.org](https://aircards.org/en/community/9f9c6f6c7824594a89ffb54378892d4f/) · 1536 × 969 | [Trump Gold Card · Aircards.org](https://aircards.org/en/community/ba9c5d821008524e81b09149880107de/) · 1536 × 969 |
 
-**裁切提示：** 当前程序会等比放大并居中裁剪图片，生成 **1536 × 969** 的横向卡面。这里展示的是原图，长宽比与目标不一致时会有裁切；正方形 Apple 素材会裁掉一部分上下区域，纸板素材的上下边缘也会被裁切。想保留特定构图，可先按约 **1.585:1** 的比例排版，再导入并查看预览。更多说明见 [素材说明](../../assets/skins/README.md)。
+**尺寸说明：** 四张示例均为 **1536 × 969**，与 AirCard 的输出尺寸一致。刷入前请查看预览。署名、社区来源和图片适配方式见 [素材说明](../../assets/skins/README.md)。
 
 ## 开始前准备
 

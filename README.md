@@ -47,6 +47,18 @@ Wallet setup, detailed troubleshooting, multi-card workflows, theme creation, co
 
 ---
 
+## Community Resources
+
+- [Aircards.org](https://aircards.org/) — A free, independently maintained
+  card artwork catalog and sharing community. Browse, filter, and
+  preview designs, download PNG artwork to use with AirCard, or
+  publish your own creations for others to discover and use.
+
+These resources are maintained by the community and are not affiliated
+with the AirCard project.
+
+---
+
 ## Installation
 
 ### macOS (Universal DMG)
@@ -138,18 +150,6 @@ for the verified environment and remaining coverage.
 > [!TIP]
 > **Universal Language & Bold Text Support:**  
 > AirCard automatically expands and flashes custom keypad assets for all system locales (English, Ukrainian, Russian, Spanish, German, French, etc.) and generates both standard and **Bold Text** cache bitmaps (`--white` and `--white-bold`), ensuring your theme works regardless of your iOS language or accessibility display settings!
-
----
-
-## Community Resources
-
-- [AirCards](https://aircards.org/) — A free, independently maintained
-  card artwork catalog and sharing community. Browse, filter, and
-  preview designs, download PNG artwork to use with AirCard, or
-  publish your own creations for others to discover and use.
-
-These resources are maintained by the community and are not affiliated
-with the AirCard project.
 
 ---
 

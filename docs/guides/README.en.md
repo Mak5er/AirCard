@@ -14,19 +14,19 @@ Artwork changes are visual: an image does not create a bank card or change its p
 
 ## Card artwork
 
-Original card artwork for this guide. Use the links below to download them. If GitHub opens an image preview, choose **Download raw file**, or open **Raw** and save the image.
+Community sample artwork, prepared as 1536 × 969 PNGs. Open the Aircards.org links below, then click **Download** on the artwork page.
 
-| Cardboard credit card | Minimal Apple artwork |
+| American Depress | Apple Card — Soft Gradient |
 | :---: | :---: |
-| <img src="../../assets/skins/cardboard-credit-card.png" alt="Cardboard-style artwork with Official Credit Card and Trust Me lettering" width="400"> | <img src="../../assets/skins/apple-minimal.png" alt="A gray Apple logo centered on a pale gray background" width="300"> |
-| [Download original PNG](../../assets/skins/cardboard-credit-card.png) · 1411 × 1008 | [Download original PNG](../../assets/skins/apple-minimal.png) · 1080 × 1080 |
+| <img src="../../assets/skins/cardboard-credit-card.png" alt="Cardboard-style artwork with Official Credit Card and Trust Me lettering" width="400"> | <img src="../../assets/skins/apple-minimal.png" alt="Apple Card artwork with a soft color gradient" width="400"> |
+| [American Depress · Aircards.org](https://aircards.org/en/community/a8b36946ea6940ceaa2ef4de0a01973f/) · 1536 × 969 | [Apple Card — Soft Gradient · Aircards.org](https://aircards.org/en/community/bca7203bbcf551aab8abccc5542bb29f/) · 1536 × 969 |
 
-| Amex black artwork | Trump Gold Card artwork |
+| American Express® Centurion Card | Trump Gold Card |
 | :---: | :---: |
-| <img src="../../assets/skins/amex-black.png" alt="Black American Express artwork with a chip and centurion portrait" width="400"> | <img src="../../assets/skins/trump-gold-card.png" alt="Gold Trump Gold Card artwork with a Trump portrait, Statue of Liberty, eagle, and VISA lettering" width="400"> |
-| [Download original PNG](../../assets/skins/amex-black.png) · 844 × 540 | [Download original PNG](../../assets/skins/trump-gold-card.png) · 1536 × 969 |
+| <img src="../../assets/skins/amex-black.png" alt="Black American Express Centurion Card artwork with a centurion portrait" width="400"> | <img src="../../assets/skins/trump-gold-card.png" alt="Gold Trump Gold Card artwork with a Trump portrait, Statue of Liberty, and eagle" width="400"> |
+| [American Express® Centurion Card · Aircards.org](https://aircards.org/en/community/9f9c6f6c7824594a89ffb54378892d4f/) · 1536 × 969 | [Trump Gold Card · Aircards.org](https://aircards.org/en/community/ba9c5d821008524e81b09149880107de/) · 1536 × 969 |
 
-**Cropping:** the current app scales images to fill and center-crops them to **1536 × 969**. The previews above show the original files; images with a different aspect ratio will be cropped. The square Apple image loses some of its top and bottom; the cardboard image also loses some of its top and bottom edges. For precise framing, prepare an image at roughly **1.585:1**, then import it and check the preview. See the [artwork notes](../../assets/skins/README.md).
+**Dimensions:** All four samples are **1536 × 969**, matching AirCard's output size. Check the preview before flashing. See the [artwork notes and community sources](../../assets/skins/README.md) for attribution and image preparation details.
 
 ## Before you start
 

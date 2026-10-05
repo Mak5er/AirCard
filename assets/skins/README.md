@@ -2,28 +2,58 @@
 
 [中文指南](../../docs/guides/README.zh-CN.md) · [English guide](../../docs/guides/README.en.md)
 
-| 文件 / File | 尺寸 / Dimensions | 内容 / Description |
+## 更多卡面 / More artwork
+
+[Aircards.org](https://aircards.org/) 是免费、独立维护的卡面素材库与分享社区。
+你可以浏览、筛选和预览卡面，下载标准 1536 × 969 尺寸的卡面图片用于 AirCard，
+也可以分享自己的作品。
+
+[Aircards.org](https://aircards.org/) is a free, independently maintained
+card artwork catalog and sharing community. Browse, filter, and preview
+designs, download card artwork at the standard 1536 × 969 size for use
+with AirCard, or share your own creations.
+
+AirCards 由社区独立维护，与 AirCard 项目无隶属关系。
+AirCards is independently maintained and is not affiliated with the AirCard project.
+
+## 示例素材 / Sample artwork
+
+| 卡面 / Artwork | 尺寸 / Dimensions | 内容 / Description |
 | --- | --- | --- |
-| [cardboard-credit-card.png](cardboard-credit-card.png) | 1411 × 1008 | 纸板信用卡趣味图案 / Cardboard credit card parody |
-| [apple-minimal.png](apple-minimal.png) | 1080 × 1080 | 浅灰底 Apple 标志 / Apple logo on a pale gray background |
-| [amex-black.png](amex-black.png) | 844 × 540 | American Express 黑色卡面图案 / Black American Express artwork |
-| [trump-gold-card.png](trump-gold-card.png) | 1536 × 969 | Trump Gold Card 金色卡面图案 / Gold Trump Gold Card artwork |
+| [American Depress · Aircards.org](https://aircards.org/en/community/a8b36946ea6940ceaa2ef4de0a01973f/) | 1536 × 969 | American Depress / 趣味纸板信用卡卡面 |
+| [Apple Card — Soft Gradient · Aircards.org](https://aircards.org/en/community/bca7203bbcf551aab8abccc5542bb29f/) | 1536 × 969 | Apple Card 柔彩渐变 / Apple Card — Soft Gradient |
+| [American Express® Centurion Card · Aircards.org](https://aircards.org/en/community/9f9c6f6c7824594a89ffb54378892d4f/) | 1536 × 969 | 美国运通百夫长卡面 / American Express® Centurion Card |
+| [Trump Gold Card · Aircards.org](https://aircards.org/en/community/ba9c5d821008524e81b09149880107de/) | 1536 × 969 | 川普金卡主题卡面 / Trump Gold Card |
 
 ## 使用 / Usage
 
-保存 PNG 原图后，将图片拖到 AirCard 的目标卡片上，查看预览，再点击 **Flash Skins**。所有文件均保留上传时的原始图片，没有重新生成、裁剪或修改。
+保存 PNG 图片后，将图片拖到 AirCard 的目标卡片上，查看预览，再点击 **Flash Skins**。
+四张示例均为 **1536 × 969 PNG**，已适配 AirCard 的卡面尺寸。
 
-Save an original PNG, drag it onto the target card in AirCard, check the preview, then click **Flash Skins**. All files are preserved exactly as supplied, without regeneration, cropping, or other edits.
-
-AirCard 当前会将卡面图片等比填满并居中裁剪至 **1536 × 969**。因此这里的原图预览不等于手机上最终显示的裁切效果。可先自行按相同比例排版，避免重要图案或文字贴边。
-
-AirCard currently scales artwork to fill and center-crops it to **1536 × 969**. These original-image previews do not show the final crop on the phone. You can prepare your own composition at that aspect ratio and keep important elements away from the edges.
+Save a PNG, drag it onto the target card in AirCard, check the preview,
+then click **Flash Skins**. All four samples are **1536 × 969 PNGs**,
+prepared for AirCard's card artwork dimensions.
 
 ## 来源 / Source
 
-这些图片由 [BryceYuuu](https://github.com/BryceYuuu) 为配套指南提供，原始作者和授权范围尚未核实；代码的 MIT License 不自动适用于这些图片及第三方标志，相关权利归各自权利人所有。
+以下链接为对应的 AirCards 社区作品页，署名按页面展示记录。
 
-These images were supplied by [BryceYuuu](https://github.com/BryceYuuu) for this guide. Their original creators and license terms have not been verified. The code's MIT License does not automatically apply to these images or third-party logos; the respective owners retain their rights.
+The links below point to the AirCards community entries, with attribution as displayed on each page.
+
+| 素材 / Artwork | 页面署名 / Listed creator |
+| --- | --- |
+| [American Depress / 趣味纸板信用卡卡面 · Aircards.org](https://aircards.org/en/community/a8b36946ea6940ceaa2ef4de0a01973f/) | toooom (@tommy) |
+| [Apple Card 柔彩渐变 / Apple Card — Soft Gradient · Aircards.org](https://aircards.org/en/community/bca7203bbcf551aab8abccc5542bb29f/) | Tom Reed (@tom.reed) |
+| [美国运通百夫长卡面 / American Express® Centurion Card · Aircards.org](https://aircards.org/en/community/9f9c6f6c7824594a89ffb54378892d4f/) | Lily Rose (@lily_rose) |
+| [川普金卡主题卡面 / Trump Gold Card · Aircards.org](https://aircards.org/en/community/ba9c5d821008524e81b09149880107de/) | Tom Reed (@tom.reed) |
+
+纸板卡面保留下载文件；其余三张按 AirCards 网站的下载转换逻辑等比缩放并居中裁剪，导出为 1536 × 969 PNG。
+
+The cardboard artwork retains the downloaded file. The other three images were scaled to fill and center-cropped to 1536 × 969 PNG using AirCards' download conversion logic.
+
+社区页面的展示和下载声明不代表代码的 MIT License 适用于这些图片或第三方标志；相关权利归各自权利人所有。
+
+The community pages' display and download statements do not place these images or third-party logos under the code's MIT License; the respective owners retain their rights.
 
 纸板素材中的 “Official Credit Card” 是图案文字，并不表示它是实际信用卡或获得官方认可；素材中的品牌、人物和标志不代表相应品牌或机构的官方卡面、认可或合作关系。
 
