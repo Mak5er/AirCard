@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/aircard-core", "crates/aircard-cli", "crates/aircard-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+
+# Pure-Rust iOS device communication (usbmuxd / lockdown / AFC / syslog).
+# PINNED: upstream warns of breaking changes on every point release until 0.2.0.
+# `ring` is the crypto backend (self-contained; `aws-lc` would pull in a cmake build).
+idevice = { version = "=0.1.68", default-features = false, features = [
+    "usbmuxd",
+    "afc",
+    "syslog_relay",
+    "pair",
+    "ring",
+] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "net", "signal"] }
+clap = { version = "4", features = ["derive"] }
+plist = "1"
+tracing = "0.1"
+
+# Card-skin image pipeline
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+miniz_oxide = "0.8"
+
+# .passthm theme archives
+zip = { version = "2", default-features = false, features = ["deflate"] }
+regex = "1"
+
+# Card detection + saved-card storage
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+dirs = "6"

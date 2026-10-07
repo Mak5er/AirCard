@@ -1,0 +1,16 @@
+[package]
+name = "aircard-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AirCard-Linux command line interface"
+
+[[bin]]
+name = "aircard"
+path = "src/main.rs"
+
+[dependencies]
+aircard-core = { path = "../aircard-core" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "aircard-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AirCard-Linux desktop GUI"
+
+[[bin]]
+name = "aircard-gui"
+path = "src/main.rs"
+
+[dependencies]
+aircard-core = { path = "../aircard-core" }
+anyhow.workspace = true
+tokio.workspace = true
+# Pinned to 0.33 to match reference/AirCard-Windows, whose UI code this ports.
+# 0.36 replaced `App::update(ctx, frame)` with `App::ui(ui, frame)` and made
+# panels take `&mut Ui`, so upgrading is a deliberate migration, not a bump.
+# glow (OpenGL) rather than wgpu: far fewer dependencies for a texture-only UI.
+eframe = { version = "0.33", default-features = false, features = [
+    "glow",
+    "wayland",
+    "x11",
+    "default_fonts",
+] }
+egui = "0.33"
+rfd = "0.17"
+image.workspace = true
