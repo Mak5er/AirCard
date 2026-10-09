@@ -563,6 +563,8 @@ class AppViewModel: ObservableObject {
     private var catalogRequestID = UUID()
     private var catalogRefreshTask: Task<Void, Never>?
     private var pendingActivationIDs: Set<String> = []
+    @Published private(set) var originalSkinBackupIDs: Set<String> = []
+    private var originalSkinRequestID = UUID()
 
     var confirmedCardIDs: Set<String> { Set(cards.filter(\.confirmed).map(\.id)) }
     var currentVerifiedCardIDs: Set<String> { currentScanIDs.union(currentPreloadedIDs) }
@@ -769,6 +771,8 @@ class AppViewModel: ObservableObject {
         stopCardScanning()
         saveCards()
         activeCardDeviceID = udid
+        originalSkinRequestID = UUID()
+        originalSkinBackupIDs = []
         catalogRequestID = UUID()
         walletCatalog = .empty
         currentScanIDs = []
@@ -776,6 +780,64 @@ class AppViewModel: ObservableObject {
         pendingActivationIDs = []
         loadSavedCards()
         saveCards()
+        refreshOriginalSkinBackups()
+    }
+
+    func hasOriginalSkinBackup(for cardID: String) -> Bool {
+        originalSkinBackupIDs.contains(cardID)
+    }
+
+    func hasPreviousSkinWithoutOriginalBackup(for cardID: String) -> Bool {
+        guard let udid = activeCardDeviceID else { return false }
+        return flashedSkins[flashedKey(udid: udid, cardId: cardID)] != nil
+            && !hasOriginalSkinBackup(for: cardID)
+    }
+
+    var selectedCardsWithoutOriginalBackup: [CardItem] {
+        cards.filter { $0.isSelected && $0.customImageURL != nil && !hasOriginalSkinBackup(for: $0.id) }
+    }
+
+    func refreshOriginalSkinBackups() {
+        guard let udid = activeCardDeviceID, !cards.isEmpty else {
+            originalSkinBackupIDs = []
+            return
+        }
+        let requestID = UUID()
+        originalSkinRequestID = requestID
+        let cardIDs = Array(Set(cards.map(\.id)))
+        let scriptDir = self.scriptDir
+        Task.detached {
+            do {
+                let process = Process()
+                process.executableURL = AppViewModel.pythonExecutableURL
+                process.environment = AppViewModel.processEnvironment
+                process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+                process.arguments = ["aircard_backend.py", "--original-skin-status", udid] + cardIDs
+                let output = Pipe()
+                process.standardOutput = output
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                guard process.terminationStatus == 0,
+                      let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let ok = response["ok"] as? Bool, ok,
+                      let available = response["available_card_ids"] as? [String] else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                await MainActor.run {
+                    guard self.originalSkinRequestID == requestID,
+                          self.activeCardDeviceID == udid else { return }
+                    self.originalSkinBackupIDs = Set(available)
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.originalSkinRequestID == requestID,
+                          self.activeCardDeviceID == udid else { return }
+                    self.log("Could not check saved original-card backups: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     func refreshWalletCatalog() {
@@ -819,10 +881,16 @@ class AppViewModel: ObservableObject {
                 guard self.catalogRequestID == requestID, self.activeCardDeviceID == udid else { return }
                 self.walletCatalog = result
                 self.isReadingWalletCache = false
-                for index in self.cards.indices {
-                    let name = result.name(for: self.cards[index].id)
-                    if self.cards[index].displayName != name { self.cards[index].displayName = name }
+                var updatedCards = self.cards
+                var cardsChanged = false
+                for index in updatedCards.indices {
+                    let name = result.name(for: updatedCards[index].id)
+                    if updatedCards[index].displayName != name {
+                        updatedCards[index].displayName = name
+                        cardsChanged = true
+                    }
                 }
+                if cardsChanged { self.cards = updatedCards }
                 if self.isScanningCards {
                     self.reconcilePendingPaymentActivations()
                     self.reconcileMatchedPaymentCards()
@@ -833,12 +901,15 @@ class AppViewModel: ObservableObject {
 
     func recordScannedCard(_ id: String) {
         let newlySeen = currentScanIDs.insert(id).inserted
+        var addedCard = false
         if let index = cards.firstIndex(where: { $0.id == id }) {
             if !cards[index].confirmed { cards[index].confirmed = true }
         } else {
             cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
+            addedCard = true
             NSSound(named: "Glass")?.play()
         }
+        if addedCard { refreshOriginalSkinBackups() }
         scannerMessage = "Detected \(currentScanIDs.count) distinct card(s) this scan. Open any missing card in Wallet to check it."
         if newlySeen && (walletCatalog.paymentStatus != "matched" || walletCatalog.name(for: id) == nil) {
             catalogRefreshTask?.cancel()
@@ -859,6 +930,7 @@ class AppViewModel: ObservableObject {
             if !cards[index].confirmed { cards[index].confirmed = true }
         } else {
             cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
+            refreshOriginalSkinBackups()
             NSSound(named: "Glass")?.play()
         }
         scannerMessage = "Verified \(currentVerifiedCardIDs.count) card(s) from this iPhone's current Wallet activity."
@@ -919,6 +991,7 @@ class AppViewModel: ObservableObject {
             }
         }
         if addedCount > 0 {
+            refreshOriginalSkinBackups()
             saveCards()
             scannerMessage = "Added \(addedCount) card ID(s) ready for skinning and flashing."
         }
@@ -950,6 +1023,77 @@ class AppViewModel: ObservableObject {
             cards[idx].customImageURL = nil
             cards[idx].customImage = nil
             log("Cleared custom skin for: \(cardId.prefix(12))...")
+        }
+    }
+
+    func restoreOriginalSkin(for cardId: String) {
+        guard let udid = device?.udid, device?.connected == true else {
+            errorMessage = "Connect and unlock the iPhone that has this card first."
+            return
+        }
+        guard hasOriginalSkinBackup(for: cardId) else {
+            errorMessage = "No original-artwork backup is available for this card on this Mac."
+            return
+        }
+        guard !isFlashing else { return }
+        isFlashing = true
+        showLogs = true
+        progress = 0
+        statusText = "Restoring original card artwork..."
+        log("Restoring saved original artwork for card \(cardId.prefix(12))...")
+        let scriptDir = self.scriptDir
+        Task.detached {
+            do {
+                let process = Process()
+                process.executableURL = AppViewModel.pythonExecutableURL
+                process.environment = AppViewModel.processEnvironment
+                process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+                process.arguments = ["aircard_backend.py", "--restore-original-skin", udid, cardId]
+                let output = Pipe()
+                process.standardOutput = output
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+                for line in lines {
+                    guard let event = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+                    if let message = event["message"] as? String {
+                        await MainActor.run { self.log("  \(message)") }
+                    }
+                }
+                guard process.terminationStatus == 0 else {
+                    let message = lines.reversed().compactMap { line -> String? in
+                        guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
+                        return event["message"] as? String
+                    }.first ?? "Could not restore the original card artwork. Check Log for details."
+                    await MainActor.run {
+                        self.isFlashing = false
+                        self.statusText = "Original card artwork restore failed."
+                        self.errorMessage = message
+                    }
+                    return
+                }
+                await MainActor.run {
+                    guard self.device?.udid == udid else {
+                        self.isFlashing = false
+                        return
+                    }
+                    self.flashedSkins.removeValue(forKey: self.flashedKey(udid: udid, cardId: cardId))
+                    UserDefaults.standard.set(self.flashedSkins, forKey: self.flashedSkinsKey)
+                    self.clearCardImage(for: cardId)
+                    self.isFlashing = false
+                    self.progress = 1
+                    self.statusText = "Original card artwork restored. Force-close Wallet on iPhone to refresh."
+                    self.log("Original card artwork restored for \(cardId.prefix(12))...")
+                }
+            } catch {
+                await MainActor.run {
+                    self.isFlashing = false
+                    self.statusText = "Original card artwork restore failed."
+                    self.errorMessage = "Could not run the restore operation: \(error.localizedDescription)"
+                }
+            }
         }
     }
     
@@ -1383,6 +1527,11 @@ class AppViewModel: ObservableObject {
         // Only flash changed skins; if nothing changed, re-flash everything selected.
         let changed = cardsNeedingFlash
         let selectedCardsWithSkin = changed.isEmpty ? allSkinned : changed
+        let previouslyModifiedWithoutBackup = Set(
+            selectedCardsWithSkin
+                .filter { hasPreviousSkinWithoutOriginalBackup(for: $0.id) }
+                .map(\.id)
+        )
         
         isFlashing = true
         showLogs = true
@@ -1448,6 +1597,9 @@ class AppViewModel: ObservableObject {
                 flashProcess.environment = AppViewModel.processEnvironment
                 flashProcess.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
                 flashProcess.arguments = ["aircard_backend.py", "--flash", udid, card.id, preparedPath]
+                if previouslyModifiedWithoutBackup.contains(card.id) {
+                    flashProcess.arguments?.append("--skip-original-backup")
+                }
                 
                 let pipe = Pipe()
                 let errPipe = Pipe()
@@ -1479,8 +1631,14 @@ class AppViewModel: ObservableObject {
                 let handleJSONLine: (String) async -> Void = { line in
                     guard !line.isEmpty,
                           let lineData = line.data(using: .utf8),
-                          let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let msg = json["message"] as? String else { return }
+                          let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { return }
+                    let eventType = json["type"] as? String
+                    if eventType == "original_backup", let backedUpCard = json["card"] as? String {
+                        await MainActor.run {
+                            _ = self.originalSkinBackupIDs.insert(backedUpCard)
+                        }
+                    }
+                    guard let msg = json["message"] as? String else { return }
                     
                     let step = (json["step"] as? NSNumber)?.doubleValue
                     let total = (json["total"] as? NSNumber)?.doubleValue
@@ -1882,8 +2040,12 @@ struct WalletCardView: View {
     let cardIndex: Int
     var isFlashed: Bool = false
     var isVerified: Bool = true
+    var hasOriginalBackup: Bool = false
+    var hasPreviousSkinWithoutBackup: Bool = false
+    var isFlashing: Bool = false
     let onPickImage: () -> Void
     let onClearImage: () -> Void
+    let onRestoreOriginal: () -> Void
     let onDelete: () -> Void
     let onDropImage: (URL) -> Void
     
@@ -2072,6 +2234,36 @@ struct WalletCardView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            HStack {
+                Button(action: onRestoreOriginal) {
+                    Label("Restore Original", systemImage: "arrow.uturn.backward")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!hasOriginalBackup || isFlashing)
+                .help(
+                    hasOriginalBackup
+                        ? "Restore the artwork saved before the first AirCard skin was applied."
+                        : hasPreviousSkinWithoutBackup
+                            ? "Unavailable: this card was already skinned before AirCard saved an original restore point. Its previous artwork cannot be recovered by AirCard."
+                            : "Unavailable until AirCard saves a restore point before the card's first skin change."
+                )
+                if hasOriginalBackup {
+                    Text("Restore point saved on this Mac")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if hasPreviousSkinWithoutBackup {
+                    Text("Already skinned; original artwork was not backed up")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("Restore point is saved before the first skin change")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
             // Bottom Info & Controls
             HStack(spacing: 8) {
                 Toggle("", isOn: $card.isSelected)
@@ -2200,6 +2392,8 @@ struct ContentView: View {
     @AppStorage("aircard.dont_show_support_on_launch") private var dontShowSupportOnLaunch: Bool = false
     @State private var showSupportPopup = false
     @State private var showCredits = false
+    @State private var showOriginalBackupWarning = false
+    @State private var pendingRestoreCardID: String?
     @State private var creditsSelectedTab = 0
     @State private var dragOffsetStart: CGPoint = .zero
     @State private var dragKeyStartOffsets: [String: CGPoint] = [:]
@@ -2267,8 +2461,12 @@ struct ContentView: View {
                                     cardIndex: visibleIndex,
                                     isFlashed: vm.isSkinFlashed(cardItem),
                                     isVerified: vm.currentVerifiedCardIDs.contains(cardID),
+                                    hasOriginalBackup: vm.hasOriginalSkinBackup(for: cardID),
+                                    hasPreviousSkinWithoutBackup: vm.hasPreviousSkinWithoutOriginalBackup(for: cardID),
+                                    isFlashing: vm.isFlashing,
                                     onPickImage: { openCardImagePicker(for: cardID) },
                                     onClearImage: { vm.clearCardImage(for: cardID) },
+                                    onRestoreOriginal: { pendingRestoreCardID = cardID },
                                     onDelete: { vm.deleteCard(id: cardID) },
                                     onDropImage: { url in
                                         guard vm.device?.udid == deviceID else { return }
@@ -2323,6 +2521,33 @@ struct ContentView: View {
                 Text("Skins successfully applied to all selected cards!\n\nPlease force-close the Wallet app on your iPhone (or reboot) to see your new designs.\n\nNote: Apple Card renders dynamically and its face color reflects your spending categories rather than static cached skins.")
             }
         }
+        .confirmationDialog(
+            "Restore original card artwork?",
+            isPresented: Binding(
+                get: { pendingRestoreCardID != nil },
+                set: { if !$0 { pendingRestoreCardID = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Restore Original Artwork", role: .destructive) {
+                guard let cardID = pendingRestoreCardID else { return }
+                pendingRestoreCardID = nil
+                vm.restoreOriginalSkin(for: cardID)
+            }
+            Button("Cancel", role: .cancel) { pendingRestoreCardID = nil }
+        } message: {
+            Text("This overwrites the card's current custom artwork with the restore point saved on this Mac. Force-close Wallet on the iPhone afterward.")
+        }
+        .confirmationDialog(
+            "Before flashing card artwork",
+            isPresented: $showOriginalBackupWarning,
+            titleVisibility: .visible
+        ) {
+            Button("Continue to Flash") { vm.applySkin() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("AirCard saves a restore point before its first supported skin change. If a card was already modified by an older build or another tool, that modified artwork may be the only version available to save; AirCard cannot reconstruct artwork that was previously overwritten.")
+        }
         .sheet(isPresented: $showSupportPopup) {
             supportPopupSheet
         }
@@ -2336,7 +2561,7 @@ struct ContentView: View {
                 }
             }
         }
-        .onChange(of: vm.selectedTab) { _, newTab in
+        .onChange(of: vm.selectedTab) { newTab in
             if newTab == .passcodeThemes && vm.isScanningCards {
                 vm.stopCardScanning()
             }
@@ -3097,7 +3322,7 @@ struct ContentView: View {
                         Text("Circle Buttons").tag(true)
                     }
                     .pickerStyle(.segmented)
-                    .onChange(of: vm.creatorMaskToCircles) { _, _ in
+                    .onChange(of: vm.creatorMaskToCircles) { _ in
                         vm.updatePosterSlicing()
                     }
                     
@@ -3140,7 +3365,7 @@ struct ContentView: View {
                         Slider(value: $vm.creatorPosterZoom, in: 0.5...3.0, step: 0.05) {
                             Text("Zoom")
                         }
-                        .onChange(of: vm.creatorPosterZoom) { _, _ in
+                        .onChange(of: vm.creatorPosterZoom) { _ in
                             vm.updatePosterSlicing()
                         }
                         .disabled(vm.creatorPosterImage == nil)
@@ -3684,7 +3909,7 @@ struct ContentView: View {
                     .padding(.vertical, 4)
                 }
                 .frame(height: 90)
-                .onChange(of: vm.logs.count) { _, _ in
+                .onChange(of: vm.logs.count) { _ in
                     if let last = vm.logs.indices.last {
                         proxy.scrollTo(last, anchor: .bottom)
                     }
@@ -3811,7 +4036,13 @@ struct ContentView: View {
                         .disabled(vm.loadedPasscodeTheme == nil || vm.isFlashing || vm.device?.connected != true)
                     }
                 } else {
-                    Button(action: { vm.applySkin() }) {
+                    Button(action: {
+                        if vm.selectedCardsWithoutOriginalBackup.isEmpty {
+                            vm.applySkin()
+                        } else {
+                            showOriginalBackupWarning = true
+                        }
+                    }) {
                         HStack(spacing: 6) {
                             if vm.isFlashing {
                                 ProgressView()

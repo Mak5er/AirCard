@@ -4,6 +4,7 @@
 
 1. INSTALLATION:
    Drag and drop the "AirCard" icon into the "Applications" folder.
+   Minimum macOS: Ventura 13.0. Supports Apple Silicon (arm64) and Intel (x86_64).
 
 2. FIRST LAUNCH (macOS Gatekeeper):
    Since AirCard is built locally, macOS might show a standard security prompt on first launch.
@@ -14,9 +15,11 @@
    Method 2 (via Terminal):
    sudo xattr -cr /Applications/AirCard.app
 
-3. ZERO PREREQUISITES:
-   AirCard is 100% self-contained for both Apple Silicon and Intel (x86) Macs.
-   No Homebrew, Python packages, or external tools required!
+3. REQUIREMENTS:
+   AirCard includes universal app and native helper binaries. Device communication
+   uses Apple's MobileDevice and AirTrafficHost frameworks. Python 3 must be
+   available on macOS for backend operations; Xcode/Command Line Tools may be
+   needed if macOS prompts to install developer tools.
 
 4. HOW TO USE:
    [Apple Wallet Cards]

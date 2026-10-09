@@ -63,7 +63,7 @@ The backend first tries to write one card's assets as a batch, then falls back t
 | `Successfully updated …`, but the phone shows the old artwork | This is a backend success report and still needs visual confirmation. Following the app's prompt, force-close Wallet from the app switcher and reopen it. If necessary, try restarting the iPhone and record the result. |
 | Still wrong after restarting | Record cache errors, whether the intended card was targeted, and whether other cards changed. Submit separate results for each stage; do not guess at a fix by deleting and re-adding a bank card. |
 
-The backend writes PNG/PDF assets and clears rendered files in `.cache` and `.pkcache`. A 100% progress bar alone is not success: check the final result and the phone's display. **Restarting is a refresh attempt, not a guarantee of restoring original artwork.** The GUI has no automatic rollback or one-click restore flow.
+The backend writes PNG/PDF assets and clears rendered files in `.cache` and `.pkcache`. A 100% progress bar alone is not success: check the final result and the phone's display. If a **Restore Original** point was saved on this Mac before the first skin change, use that card's restore button, then force-close Wallet and inspect the phone. The local snapshot remains available for another restore. A restart alone only refreshes Wallet; it does not restore original artwork. Cards changed before a snapshot was captured cannot be reconstructed by AirCard.
 
 ## What to include in a report
 

@@ -177,13 +177,20 @@ def operation_ok(result: dict) -> bool:
     )
 
 
-def read_file(udid: str, target: str, leaf: str, retries: int = 1) -> "bytes | None":
+def read_file(
+    udid: str,
+    target: str,
+    leaf: str,
+    retries: int = 1,
+    require_restored: bool = False,
+) -> "bytes | None":
     """Exports a file outside Media into Media, reads it via AFC, restores it.
 
     Move semantics: the AirTraffic sync MOVES target/leaf to Media/recovered.
     The original is written back immediately with write_file, then the export
     staging is cleaned and Books preimage restored. Returns file bytes, or
-    None on failure. Test only on disposable paths before Wallet data.
+    None on failure. When require_restored is true, return bytes only after the
+    original file and all temporary device state have been restored.
     """
     if "/" in leaf or leaf in ("", ".", ".."):
         raise ValueError("leaf must be a plain file name")
@@ -276,7 +283,7 @@ def read_file(udid: str, target: str, leaf: str, retries: int = 1) -> "bytes | N
                     return data
                 # Bytes were still captured; return them so caller can save
                 # a backup copy even if cleanup reported incomplete.
-                if data:
+                if data and not require_restored:
                     return data
                 return None
         except Exception:

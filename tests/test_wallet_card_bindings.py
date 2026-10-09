@@ -25,7 +25,8 @@ class WalletCardBindingTests(unittest.TestCase):
             binary = Path(directory) / "binding-tests"
             flags = ["-D", "LEGACY_INDEX_BINDINGS"] if os.environ.get("AIRCARD_TEST_LEGACY_BINDINGS") else []
             compiled = subprocess.run([
-                "swiftc", "-sdk", sdk, "-parse-as-library", *flags,
+                "swiftc", "-sdk", sdk, "-parse-as-library",
+                "-target", platform.machine() + "-apple-macosx13.0", *flags,
                 str(source),
                 str(root / "Sources/WalletDiscovery.swift"),
                 str(root / "Sources/WalletDiagnosticsView.swift"),

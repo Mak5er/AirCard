@@ -70,6 +70,23 @@ class ReadFileTests(unittest.TestCase):
         mock_write.assert_not_called()
         self.assertNotIn("finish-write", calls)
 
+    def test_strict_read_rejects_bytes_when_device_restore_fails(self) -> None:
+        expected = b"captured-but-not-restored"
+
+        def fake_native(command, udid, *args):
+            if command == "afc-read":
+                Path(args[1]).write_bytes(expected)
+            return _ok()
+
+        with (
+            patch.object(apply_card_skin, "native", side_effect=fake_native),
+            patch.object(apply_card_skin, "run_json", return_value={"exitCode": 0, "ok": True}),
+            patch.object(apply_card_skin, "write_file", return_value=False),
+        ):
+            self.assertIsNone(apply_card_skin.read_file(
+                "udid", "/var/tmp", "leaf.bin", require_restored=True
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()

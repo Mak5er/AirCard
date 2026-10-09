@@ -51,6 +51,12 @@ from apply_card_skin import (
     DEVICE_HELPER,
 )
 from card_assets import CACHE_FILES, build_card_assets
+from original_card_skin import (
+    ORIGINAL_SKIN_ASSETS,
+    capture_original_skin,
+    has_original_skin,
+    load_original_skin,
+)
 from aircard import (
     find_device_helper,
     get_connected_device,
@@ -58,6 +64,8 @@ from aircard import (
     load_saved_cards,
     save_cards,
 )
+
+CARD_HASH_PATTERN = re.compile(r"[-A-Za-z0-9_+=]{16,64}\Z")
 
 
 def cmd_device(target_udid: str | None = None):
@@ -173,7 +181,10 @@ def cmd_prepare_image(src: str, dst: str):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
-def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
+def cmd_flash(udid: str, card_hash: str, image_path: str, capture_original: bool = True) -> bool:
+    if not CARD_HASH_PATTERN.fullmatch(card_hash):
+        print(json.dumps({"ok": False, "error": "Invalid card identifier"}))
+        return False
     img_path = Path(image_path)
     if not img_path.is_file():
         print(json.dumps({"ok": False, "error": "Image file not found"}))
@@ -189,6 +200,37 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         }))
         sys.stdout.flush()
         return False
+
+    if capture_original:
+        backed_up, backup_error = capture_original_skin(udid, card_hash)
+        if not backed_up:
+            print(json.dumps({
+                "type": "error",
+                "card": card_hash,
+                "message": backup_error or "Could not save the original card artwork; no artwork was changed."
+            }))
+            sys.stdout.flush()
+            return False
+        print(json.dumps({
+            "type": "original_backup",
+            "card": card_hash,
+            "message": "Original card artwork saved securely on this Mac for restore."
+        }))
+        sys.stdout.flush()
+    elif has_original_skin(udid, card_hash):
+        print(json.dumps({
+            "type": "original_backup",
+            "card": card_hash,
+            "message": "Existing original-artwork restore point found."
+        }))
+        sys.stdout.flush()
+    else:
+        print(json.dumps({
+            "type": "warning",
+            "card": card_hash,
+            "message": "This card was modified before an original-artwork backup existed; restore is unavailable."
+        }))
+        sys.stdout.flush()
 
     pkpass_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
 
@@ -294,6 +336,81 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         "message": f"Successfully updated {card_hash[:12]}..."
     }))
     sys.stdout.flush()
+    return True
+
+
+def cmd_original_skin_status(udid: str, card_hashes: list[str]) -> None:
+    available = [
+        card_hash for card_hash in card_hashes
+        if CARD_HASH_PATTERN.fullmatch(card_hash) and has_original_skin(udid, card_hash)
+    ]
+    print(json.dumps({"ok": True, "available_card_ids": available}))
+
+
+def cmd_restore_original_skin(udid: str, card_hash: str) -> bool:
+    if not CARD_HASH_PATTERN.fullmatch(card_hash):
+        print(json.dumps({
+            "type": "error",
+            "message": "Invalid card identifier; no device files were changed."
+        }))
+        return False
+    originals = load_original_skin(udid, card_hash)
+    if originals is None:
+        print(json.dumps({
+            "type": "error",
+            "card": card_hash,
+            "message": "No valid original-artwork backup exists on this Mac for this card."
+        }))
+        return False
+
+    target = f"/var/mobile/Library/Passes/Cards/{card_hash}.pkpass"
+    assets = [(name, originals[name]) for name in ORIGINAL_SKIN_ASSETS]
+    try:
+        ok = write_files_batch(udid, target, assets)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        ok = False
+
+    if not ok:
+        for name, payload in assets:
+            try:
+                if not write_file(udid, target, name, payload):
+                    print(json.dumps({
+                        "type": "error",
+                        "card": card_hash,
+                        "message": f"Could not restore {name}; original backup remains saved on this Mac."
+                    }))
+                    return False
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                print(json.dumps({
+                    "type": "error",
+                    "card": card_hash,
+                    "message": f"Could not restore {name}; original backup remains saved on this Mac."
+                }))
+                return False
+
+    for extension in (".cache", ".pkcache"):
+        cache_dir = f"/var/mobile/Library/Passes/Cards/{card_hash}{extension}"
+        try:
+            if not remove_files(udid, cache_dir, list(CACHE_FILES)):
+                print(json.dumps({
+                    "type": "error",
+                    "card": card_hash,
+                    "message": f"Original artwork was written, but Wallet cache cleanup failed ({extension})."
+                }))
+                return False
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            print(json.dumps({
+                "type": "error",
+                "card": card_hash,
+                "message": f"Original artwork was written, but Wallet cache cleanup failed ({extension})."
+            }))
+            return False
+
+    print(json.dumps({
+        "type": "success",
+        "card": card_hash,
+        "message": "Original card artwork restored. Force-close Wallet on the iPhone to refresh the card."
+    }))
     return True
 
 
@@ -653,7 +770,13 @@ def main():
     elif norm_cmd == "prepare-image" and len(sys.argv) > 3:
         cmd_prepare_image(sys.argv[2], sys.argv[3])
     elif norm_cmd == "flash" and len(sys.argv) > 4:
-        if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4]):
+        capture_original = len(sys.argv) < 6 or sys.argv[5] != "--skip-original-backup"
+        if not cmd_flash(sys.argv[2], sys.argv[3], sys.argv[4], capture_original):
+            sys.exit(1)
+    elif norm_cmd == "original-skin-status" and len(sys.argv) > 2:
+        cmd_original_skin_status(sys.argv[2], sys.argv[3:])
+    elif norm_cmd == "restore-original-skin" and len(sys.argv) > 3:
+        if not cmd_restore_original_skin(sys.argv[2], sys.argv[3]):
             sys.exit(1)
     elif norm_cmd == "inspect-passthm" and len(sys.argv) > 2:
         cmd_inspect_passthm(sys.argv[2])

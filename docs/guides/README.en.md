@@ -93,8 +93,7 @@ Open **Log** and look for `Connected to the unified device log stream`. The scan
 AirCard center-crops to a landscape card shape. Prepare artwork at **1536 × 969**, or the same aspect ratio, and keep important text and graphics near the center. The sample images retain their original dimensions so you can adjust the composition yourself.
 
 ### Can I restore the original card artwork with one click?
-
-The current app does not provide a one-click restore workflow. **The × at the top right of a card (Remove skin)** only clears the image selected on the Mac; it does not restore artwork on the iPhone. If restoration is essential to you, check the current upstream documentation before applying a skin.
+Use **Restore Original** on that card after AirCard has saved a restore point on this Mac. The point is captured before the first skin change supported by this build, and is stored locally per iPhone/card. The **× (Remove skin)** only clears the Mac-side pending image. Artwork already overwritten by an older build or another tool cannot be reconstructed; see [multi-card restore limits](MULTI-CARD.en.md#what-the-card-list-remembers).
 
 ### Can I use Windows or run this directly on an iPhone?
 

@@ -30,6 +30,7 @@
 - 🔍 **Interactive Photo Framing:** Pan and zoom artwork directly inside keypad buttons with real-time iPhone preview.
 - ✏️ **Edit Existing .passthm Themes:** Open any Cowabunga or Nugget theme package directly in the creator, tweak button artwork, reposition photos, and re-export or flash.
 - ⚡ **Per-Card & Bulk Customization:** Set unique artwork for each card or apply one design across all cards with a single click.
+- ↩️ **Restore Original Card Artwork:** AirCard saves a local restore point before its first supported skin change and can write that artwork back to the iPhone.
 - 📱 **Zero-Hassle Card Detection:** Tap any card in your iPhone's Wallet app to detect its hash in real-time.
 - 🚀 **100% Standalone (Universal):** Native support for both **Apple Silicon** and **Intel (x86)** Macs. All required device-communication utilities and image engines are pre-bundled inside the app.
 - 📦 **Zero Prerequisites:** No Homebrew, Python packages, or terminal setup required for macOS users.
@@ -49,10 +50,16 @@ Wallet setup, detailed troubleshooting, multi-card workflows, theme creation, co
 
 ## Installation
 
-### macOS (Universal DMG)
+### macOS 13 or later (Universal DMG)
 1. Download **`AirCard.dmg`** from [Releases](https://github.com/mak5er/AirCard/releases).
 2. Open `AirCard.dmg` and drag **`AirCard.app`** into your **Applications** folder.
-3. Fully compatible with both **Apple Silicon** and **Intel (x86)** Macs.
+3. AirCard's minimum supported macOS version is **macOS Ventura 13.0**. The app and bundled native helpers include **Apple Silicon (arm64)** and **Intel (x86_64)** binaries.
+
+> [!WARNING]
+> Restore points are captured on the first skin change made by a build with this feature. If a card was already modified by an older AirCard build or another tool, its previous original artwork cannot be reconstructed; do not treat the currently installed artwork as the original.
+
+> [!NOTE]
+> The macOS 13.0 deployment target was built and checked on an Intel Mac running macOS 13.7.8. This verifies that the app and native helpers can run on that OS; it does not establish that every iPhone connection, scanning, or flashing workflow works on every macOS 13 device. AirCard uses Apple's private `MobileDevice` and `AirTrafficHost` frameworks for device communication.
 
 > [!NOTE]
 > **First Launch on macOS (Gatekeeper):**
@@ -161,7 +168,7 @@ cd AirCard
 chmod +x build.sh
 ./build.sh
 ```
-This builds universal binaries (`arm64` + `x86_64`), bundles dependencies into `build/AirCard.app`, and outputs `build/AirCard.dmg`.
+This builds universal app and helper binaries (`arm64` + `x86_64`) with a macOS 13.0 minimum, bundles dependencies into `build/AirCard.app`, and outputs `build/AirCard.dmg`. The build requires macOS, Xcode or Command Line Tools (including `swiftc`, `clang`, `lipo`, and `codesign`), Python 3 for app operation, and the system's private MobileDevice/AirTrafficHost frameworks. `create-dmg` is optional; without it, the build uses `hdiutil`.
 
 ---
 

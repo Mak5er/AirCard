@@ -59,7 +59,7 @@ struct WalletDiagnosticsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if let date = vm.walletCatalog.cacheUpdatedAt {
-                            Text("Cache date: \(date.prefix(10))")
+                            Text("Cache date: \(String(date.prefix(10)))")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(vm.walletCatalog.warnings, id: \.self) { warning in
