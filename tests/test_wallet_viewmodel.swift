@@ -26,8 +26,11 @@ struct WalletViewModelTests {
         vm.recordScannedCard(a)
         vm.recordScannedCard(a)
         precondition(vm.currentScanIDs == [a] && vm.confirmedCardIDs == [a, b])
-        precondition(vm.currentVerifiedCardIDs == [a, b])
+        precondition(vm.currentVerifiedCardIDs == [a]) // Cache-only B is not live-verified (#168).
+        precondition(vm.currentCacheImportedIDs == [b])
         precondition(vm.cards.count == 2)
+        vm.recordScannedCard(b)
+        precondition(vm.currentVerifiedCardIDs == [a, b])
         vm.isScanningCards = false
         let activation = "A00000000310100100000020"
         precondition(!vm.recordActivatedPaymentCard(activation))

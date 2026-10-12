@@ -558,6 +558,8 @@ class AppViewModel: ObservableObject {
     @Published var scannerMessage = "Open Wallet and scan cards to verify this iPhone's saved entries."
     @Published var currentScanIDs: Set<String> = []
     private var currentPreloadedIDs: Set<String> = []
+    /// IDs imported from the Mac Wallet cache during this scan but not yet seen on the iPhone.
+    private(set) var currentCacheImportedIDs: Set<String> = []
     private var activeCardDeviceID: String?
     private var isLoadingCards = false
     private var catalogRequestID = UUID()
@@ -773,6 +775,7 @@ class AppViewModel: ObservableObject {
         walletCatalog = .empty
         currentScanIDs = []
         currentPreloadedIDs = []
+        currentCacheImportedIDs = []
         pendingActivationIDs = []
         loadSavedCards()
         saveCards()
@@ -831,14 +834,18 @@ class AppViewModel: ObservableObject {
         }
     }
 
-    func recordScannedCard(_ id: String) {
-        let newlySeen = currentScanIDs.insert(id).inserted
+    private func confirmCard(_ id: String) {
         if let index = cards.firstIndex(where: { $0.id == id }) {
             if !cards[index].confirmed { cards[index].confirmed = true }
         } else {
             cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
             NSSound(named: "Glass")?.play()
         }
+    }
+
+    func recordScannedCard(_ id: String) {
+        let newlySeen = currentScanIDs.insert(id).inserted
+        confirmCard(id)
         scannerMessage = "Detected \(currentScanIDs.count) distinct card(s) this scan. Open any missing card in Wallet to check it."
         if newlySeen && (walletCatalog.paymentStatus != "matched" || walletCatalog.name(for: id) == nil) {
             catalogRefreshTask?.cancel()
@@ -855,12 +862,7 @@ class AppViewModel: ObservableObject {
 
     func recordPreloadedCard(_ id: String) {
         guard currentPreloadedIDs.insert(id).inserted else { return }
-        if let index = cards.firstIndex(where: { $0.id == id }) {
-            if !cards[index].confirmed { cards[index].confirmed = true }
-        } else {
-            cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
-            NSSound(named: "Glass")?.play()
-        }
+        confirmCard(id)
         scannerMessage = "Verified \(currentVerifiedCardIDs.count) card(s) from this iPhone's current Wallet activity."
     }
 
@@ -896,13 +898,15 @@ class AppViewModel: ObservableObject {
         guard isScanningCards, walletCatalog.paymentStatus == "matched" else { return }
         let cachedIDs = Set(walletCatalog.payments.map(\.id))
         guard !currentVerifiedCardIDs.isDisjoint(with: cachedIDs) else { return }
-        let missing = walletCatalog.payments.filter { !currentVerifiedCardIDs.contains($0.id) }
+        // Cache imports are tracked apart from live IDs: one live match must not verify the rest of the snapshot (#168).
+        let missing = walletCatalog.payments.filter { !currentVerifiedCardIDs.contains($0.id) && !currentCacheImportedIDs.contains($0.id) }
         for card in missing {
-            recordPreloadedCard(card.id)
+            currentCacheImportedIDs.insert(card.id)
+            confirmCard(card.id)
         }
         if !missing.isEmpty {
-            scannerMessage = "Matched \(walletCatalog.payments.count) payment card(s) to this iPhone. Open membership cards individually if any are missing."
-            log("Added \(missing.count) payment card(s) from the device-matched Wallet cache.")
+            scannerMessage = "Added \(missing.count) payment card(s) from this Mac's Wallet cache. Open each one in Wallet to verify it on this iPhone."
+            log("Added \(missing.count) payment card(s) from the device-matched Wallet cache (not yet seen in this scan).")
         }
     }
 
@@ -1207,6 +1211,7 @@ class AppViewModel: ObservableObject {
         isScanningCards = true
         currentScanIDs = []
         currentPreloadedIDs = []
+        currentCacheImportedIDs = []
         pendingActivationIDs = []
         scannerMessage = "Connecting to the iPhone log stream…"
         statusText = "Double-click Side button, pass Face ID, then tap your card..."
@@ -1882,6 +1887,7 @@ struct WalletCardView: View {
     let cardIndex: Int
     var isFlashed: Bool = false
     var isVerified: Bool = true
+    var isCacheImported: Bool = false
     let onPickImage: () -> Void
     let onClearImage: () -> Void
     let onDelete: () -> Void
@@ -2056,6 +2062,11 @@ struct WalletCardView: View {
                     Text("Matched to this iPhone in current scan")
                         .font(.caption2)
                         .foregroundStyle(.green)
+                } else if isCacheImported {
+                    Text("From Mac Wallet cache · Not seen in this scan")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .help("Imported from this Mac's Wallet cache. Open the card in Wallet to verify it on this iPhone before flashing.")
                 } else if card.confirmed {
                     Text("Saved on this iPhone")
                         .font(.caption2)
@@ -2267,6 +2278,7 @@ struct ContentView: View {
                                     cardIndex: visibleIndex,
                                     isFlashed: vm.isSkinFlashed(cardItem),
                                     isVerified: vm.currentVerifiedCardIDs.contains(cardID),
+                                    isCacheImported: vm.currentCacheImportedIDs.contains(cardID),
                                     onPickImage: { openCardImagePicker(for: cardID) },
                                     onClearImage: { vm.clearCardImage(for: cardID) },
                                     onDelete: { vm.deleteCard(id: cardID) },
