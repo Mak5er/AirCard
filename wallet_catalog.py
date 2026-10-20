@@ -49,7 +49,7 @@ def read_limited(path: Path) -> bytes:
 def card(identifier, name, source, activation_id=None):
     if not isinstance(identifier, str) or not CARD_ID.fullmatch(identifier):
         return None
-    result = {"id": identifier, "name": name.strip()[:200] if isinstance(name, str) and name.strip() else "Unnamed card", "source": source}
+    result = {"id": identifier, "name": name.strip()[:200] if isinstance(name, str) and name.strip() else "未命名卡片", "source": source}
     if isinstance(activation_id, str) and re.fullmatch(r"[A-Fa-f0-9]{10,64}", activation_id):
         result["activationID"] = activation_id.upper()
     return result
@@ -93,25 +93,25 @@ def build_catalog(root: Path, confirmed_ids: list[str], product: str) -> dict:
             result["payments"] = matching[0]
         elif len(matching) > 1:
             result["paymentStatus"] = "ambiguous"
-            result["warnings"].append("More than one cached device matches these cards. Payment names and missing-card counts are withheld.")
+            result["warnings"].append("有多个缓存设备与这些卡片匹配。已暂停显示支付卡片名称和未检测卡片计数。")
         elif len(candidates) == 1:
             result["paymentStatus"] = "matched"
             result["payments"] = candidates[0]
         elif len(candidates) > 1:
             result["paymentStatus"] = "ambiguous"
-            result["warnings"].append("More than one cached device has this model. Activate one payment card to identify the correct Wallet cache.")
+            result["warnings"].append("存在多台相同型号的缓存设备。请激活一张支付卡以识别正确的钱包缓存。")
         else:
             result["paymentStatus"] = "unmatched"
-            result["warnings"].append("Scan a payment card on the connected iPhone to match its cache. A missing match can also mean the Mac cache is unavailable or out of date.")
+            result["warnings"].append("请在已连接的 iPhone 上扫描一张支付卡以匹配其缓存。若未匹配，也可能意味着 Mac 缓存不可用或已过期。")
         result["cacheUpdatedAt"] = datetime.fromtimestamp(archive_path.stat().st_mtime, timezone.utc).isoformat()
     except (OSError, ValueError, KeyError, TypeError, IndexError, OverflowError, RecursionError, plistlib.InvalidFileException):
-        result["warnings"].append("Payment cache could not be read. Scanning still works; reconnect the iPhone and use Read Cache to retry.")
+        result["warnings"].append("无法读取支付缓存。扫描功能仍可使用；请重新连接 iPhone 并点击“读取缓存”重试。")
 
     try:
         entries = list((root / "Cards").iterdir())
     except OSError:
         entries = []
-        result["warnings"].append("Membership cache could not be read. Open membership cards in the iPhone Wallet app and scan them directly.")
+        result["warnings"].append("无法读取凭证与会员卡缓存。请在 iPhone“钱包”应用中打开卡片直接扫描。")
     unreadable = False
     for entry in sorted(entries, key=lambda p: p.name):
         if entry.suffix != ".pkpass" or entry.is_symlink() or not CARD_ID.fullmatch(entry.stem):
@@ -133,7 +133,7 @@ def build_catalog(root: Path, confirmed_ids: list[str], product: str) -> dict:
         except (OSError, ValueError, TypeError):
             unreadable = True
     if unreadable:
-        result["warnings"].append("Some membership metadata could not be read. The cache list may be incomplete.")
+        result["warnings"].append("部分凭证与会员卡元数据无法读取。缓存列表可能不完整。")
     result["memberships"] = unique_cards(result["memberships"])
     return result
 

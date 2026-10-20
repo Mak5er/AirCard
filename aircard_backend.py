@@ -136,13 +136,13 @@ def cmd_save_cards(cards_json: str):
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return
-    print(json.dumps({"ok": False, "error": "Invalid format"}))
+    print(json.dumps({"ok": False, "error": "格式无效"}))
 
 
 def cmd_prepare_image(src: str, dst: str):
     path = Path(src).expanduser()
     if not path.is_file():
-        print(json.dumps({"ok": False, "error": f"File not found: {src}"}))
+        print(json.dumps({"ok": False, "error": f"文件未找到: {src}"}))
         return
     try:
         from PIL import Image, ImageOps
@@ -176,7 +176,7 @@ def cmd_prepare_image(src: str, dst: str):
 def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
     img_path = Path(image_path)
     if not img_path.is_file():
-        print(json.dumps({"ok": False, "error": "Image file not found"}))
+        print(json.dumps({"ok": False, "error": "未找到图片文件"}))
         return False
 
     try:
@@ -185,7 +185,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         print(json.dumps({
             "type": "error",
             "card": card_hash,
-            "message": "Failed to prepare card artwork"
+            "message": "准备卡片素材失败"
         }))
         sys.stdout.flush()
         return False
@@ -207,7 +207,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
             "step": current,
             "total": total_steps,
             "leaf": leaf,
-            "message": f"Writing {leaf} ({current}/{total_steps})...",
+            "message": f"正在写入 {leaf} ({current}/{total_steps})...",
         }))
         sys.stdout.flush()
 
@@ -216,7 +216,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         "card": card_hash,
         "step": 0,
         "total": total_steps,
-        "message": f"Writing {num_assets} artwork files (fast batch)..."
+        "message": f"正在写入 {num_assets} 个素材文件（快速批量）..."
     }))
     sys.stdout.flush()
 
@@ -238,7 +238,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
                 "step": file_index,
                 "total": total_steps,
                 "leaf": asset,
-                "message": f"[Fallback] Writing {asset} ({file_index}/{total_steps})...",
+                "message": f"[兜底模式] 正在写入 {asset} ({file_index}/{total_steps})...",
             }))
             sys.stdout.flush()
             try:
@@ -257,7 +257,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
             "card": card_hash,
             "step": step,
             "total": total_steps,
-            "message": f"Invalidating cache ({ext})..."
+            "message": f"正在清除缓存 ({ext})..."
         }))
         sys.stdout.flush()
         try:
@@ -271,7 +271,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
                 "card": card_hash,
                 "step": step,
                 "total": total_steps,
-                "message": f"Could not clear Wallet cache ({ext}); card was not reported as updated."
+                "message": f"无法清除钱包缓存 ({ext})；卡片可能未更新。"
             }))
             sys.stdout.flush()
 
@@ -281,7 +281,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
             "card": card_hash,
             "step": total_steps,
             "total": total_steps,
-            "message": f"Failed to update {card_hash[:12]}..."
+            "message": f"更新卡片 {card_hash[:12]}... 失败"
         }))
         sys.stdout.flush()
         return False
@@ -291,7 +291,7 @@ def cmd_flash(udid: str, card_hash: str, image_path: str) -> bool:
         "card": card_hash,
         "step": total_steps,
         "total": total_steps,
-        "message": f"Successfully updated {card_hash[:12]}..."
+        "message": f"成功更新卡片 {card_hash[:12]}..."
     }))
     sys.stdout.flush()
     return True
@@ -459,7 +459,7 @@ def parse_passthm_archive(
 def cmd_inspect_passthm(passthm_path: str):
     path = Path(passthm_path).expanduser()
     if not path.is_file():
-        print(json.dumps({"ok": False, "error": f"File not found: {passthm_path}"}))
+        print(json.dumps({"ok": False, "error": f"文件未找到: {passthm_path}"}))
         return
     try:
         detected_ver = "TelephonyUI-10"
@@ -475,7 +475,7 @@ def cmd_inspect_passthm(passthm_path: str):
 
         items = parse_passthm_archive(str(path), detected_ver)
         if not items:
-            print(json.dumps({"ok": False, "error": "No image assets found in archive"}))
+            print(json.dumps({"ok": False, "error": "主题包中未找到图片素材"}))
             return
 
         keys_preview = {}
@@ -511,13 +511,13 @@ def cmd_flash_passthm(
 ) -> bool:
     path = Path(passthm_path).expanduser()
     if not path.is_file():
-        print(json.dumps({"ok": False, "error": "Passcode theme file not found"}))
+        print(json.dumps({"ok": False, "error": "未找到锁屏密码主题文件"}))
         return False
 
     try:
         items_to_write = parse_passthm_archive(str(path), telephony_ver, target_lang, target_bold)
         if not items_to_write:
-            print(json.dumps({"ok": False, "error": "No image assets found in archive"}))
+            print(json.dumps({"ok": False, "error": "主题包中未找到图片素材"}))
             return False
 
         # Group items by target directory (e.g. /var/mobile/Library/Caches/TelephonyUI-10)
@@ -545,7 +545,7 @@ def cmd_flash_passthm(
             "type": "progress",
             "step": 0,
             "total": total_steps,
-            "message": f"Flashing passcode theme '{path.stem}' ({total_steps} assets)..."
+            "message": f"正在写入锁屏密码主题 '{path.stem}' ({total_steps} 个素材)..."
         }))
         sys.stdout.flush()
 
@@ -563,7 +563,7 @@ def cmd_flash_passthm(
                         "step": curr,
                         "total": total_steps,
                         "leaf": leaf,
-                        "message": f"Writing {leaf} ({curr}/{total_steps})..."
+                        "message": f"正在写入 {leaf} ({curr}/{total_steps})..."
                     }))
                     sys.stdout.flush()
                 return on_atc_progress
@@ -572,7 +572,7 @@ def cmd_flash_passthm(
                 "type": "progress",
                 "step": base_step,
                 "total": total_steps,
-                "message": f"Flashing {len(dir_files)} asset(s) into {tdir_name}..."
+                "message": f"正在写入 {len(dir_files)} 个素材至 {tdir_name}..."
             }))
             sys.stdout.flush()
 
@@ -588,7 +588,7 @@ def cmd_flash_passthm(
                 # If batch failed, fallback to file-by-file write for this directory
                 print(json.dumps({
                     "type": "warning",
-                    "message": f"Batch write notice for {tdir_name}, falling back to file-by-file write..."
+                    "message": f"{tdir_name} 批量写入提示，降级为单文件逐个写入..."
                 }))
                 sys.stdout.flush()
 
@@ -600,7 +600,7 @@ def cmd_flash_passthm(
                         "step": curr,
                         "total": total_steps,
                         "leaf": leaf,
-                        "message": f"[Fallback] Writing {leaf} ({curr}/{total_steps})..."
+                        "message": f"[兜底模式] 正在写入 {leaf} ({curr}/{total_steps})..."
                     }))
                     sys.stdout.flush()
 
@@ -612,7 +612,7 @@ def cmd_flash_passthm(
                 if failed_leaves:
                     print(json.dumps({
                         "type": "error",
-                        "message": f"Could not write {len(failed_leaves)} file(s) in {tdir_name}: {', '.join(failed_leaves[:5])}"
+                        "message": f"无法写入 {tdir_name} 中的 {len(failed_leaves)} 个文件: {', '.join(failed_leaves[:5])}"
                     }))
                     sys.stdout.flush()
                     return False
@@ -623,7 +623,7 @@ def cmd_flash_passthm(
             "type": "success",
             "step": total_steps,
             "total": total_steps,
-            "message": f"Passcode theme '{path.stem}' successfully applied! Lock your iPhone to check."
+            "message": f"锁屏密码主题 '{path.stem}' 应用成功！请锁定 iPhone 查看效果。"
         }))
         sys.stdout.flush()
         return True
@@ -635,7 +635,7 @@ def cmd_flash_passthm(
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "No command provided"}))
+        print(json.dumps({"error": "未提供命令"}))
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -664,7 +664,7 @@ def main():
         if not cmd_flash_passthm(sys.argv[2], sys.argv[3], t_ver, t_lang, t_bold):
             sys.exit(1)
     else:
-        print(json.dumps({"error": f"Unknown command: {cmd}"}))
+        print(json.dumps({"error": f"未知命令: {cmd}"}))
         sys.exit(1)
 
 

@@ -567,24 +567,24 @@ def invalidate_cache(udid: str, card_hash: str) -> bool:
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: apply_card_skin.py <udid> <image_path> [card_hash ...]")
+        print("用法: apply_card_skin.py <udid> <image_path> [card_hash ...]")
         return
     udid = sys.argv[1]
     img_path = Path(sys.argv[2])
     if not img_path.is_file():
-        print(f"Error: {img_path} not found")
+        print(f"错误: {img_path} 未找到")
         sys.exit(1)
     img_data = img_path.read_bytes()
     hashes = sys.argv[3:]
 
-    print(f"Loaded image from batter: {len(img_data)} bytes")
-    print(f"Targeting {len(hashes)} cards on device {udid}...")
+    print(f"已加载卡面图片: {len(img_data)} 字节")
+    print(f"正在对设备 {udid} 上的 {len(hashes)} 张卡片进行处理...")
 
     for index, h in enumerate(hashes, 1):
         target_dir = f"/var/mobile/Library/Passes/Cards/{h}.pkpass"
-        print(f"\n[{index}/{len(hashes)}] Processing card: {h}")
+        print(f"\n[{index}/{len(hashes)}] 正在处理卡片: {h}")
 
-        print("  -> Writing card artwork (fast batch)...")
+        print("  -> 正在写入卡面素材 (快速批量)...")
         card_assets = [
             ("cardBackgroundCombined@3x.png", img_data),
             ("cardBackgroundCombined@2x.png", img_data),
@@ -594,13 +594,13 @@ def main():
             ok3x = write_file(udid, target_dir, "cardBackgroundCombined@3x.png", img_data)
             ok2x = write_file(udid, target_dir, "cardBackgroundCombined@2x.png", img_data)
             ok_batch = ok3x and ok2x
-        print(f"     Result: {'SUCCESS' if ok_batch else 'FAILED'}")
+        print(f"     结果: {'成功' if ok_batch else '失败'}")
 
-        print("  -> Invalidating pass cache...")
+        print("  -> 正在清除卡片缓存...")
         ok_cache = invalidate_cache(udid, h)
-        print(f"     Result: {'SUCCESS' if ok_cache else 'FAILED (or cache already empty)'}")
+        print(f"     结果: {'成功' if ok_cache else '失败 (或缓存已为空)'}")
 
-    print("\nAll done! Please force close Wallet on your iPhone and reopen it.")
+    print("\n全部完成！请在 iPhone 上强制退出“钱包” App 并重新打开。")
 
 
 if __name__ == "__main__":

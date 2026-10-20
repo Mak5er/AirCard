@@ -12,12 +12,12 @@ struct WalletDiagnosticsView: View {
         let matched = vm.currentVerifiedCardIDs.count
         let hidden = max(0, vm.cards.count - matched)
         if vm.isScanningCards {
-            return "Scanning iPhone Wallet…"
+            return "正在扫描 iPhone 钱包…"
         }
         if matched > 0 {
-            return hidden > 0 ? "\(matched) card(s) verified · \(hidden) hidden" : "\(matched) card(s) verified"
+            return hidden > 0 ? "已验证 \(matched) 张卡片 · \(hidden) 张隐藏" : "已验证 \(matched) 张卡片"
         }
-        return "No cards detected. Tap 'Scan Cards' to begin."
+        return "未检测到卡片。点击“扫描卡片”开始。"
     }
 
     var body: some View {
@@ -36,13 +36,13 @@ struct WalletDiagnosticsView: View {
 
                 Spacer()
 
-                Button(vm.isReadingWalletCache ? "Reading…" : "Read Cache") {
+                Button(vm.isReadingWalletCache ? "正在读取…" : "读取缓存") {
                     vm.refreshWalletCatalog()
                 }
                 .disabled(vm.isReadingWalletCache || vm.device?.connected != true)
-                .help("Read this Mac's Wallet cache")
+                .help("读取此 Mac 上的钱包缓存")
 
-                Button("Reconnect") {
+                Button("重新连接") {
                     vm.checkDevice()
                 }
                 .disabled(vm.isCheckingDevice || vm.isFlashing)
@@ -59,24 +59,24 @@ struct WalletDiagnosticsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         if let date = vm.walletCatalog.cacheUpdatedAt {
-                            Text("Cache date: \(date.prefix(10))")
+                            Text("缓存日期：\(date.prefix(10))")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(vm.walletCatalog.warnings, id: \.self) { warning in
                             Label(warning, systemImage: "info.circle")
                         }
                         if vm.walletCatalog.paymentStatus == "matched" && !vm.pendingPaymentCards.isEmpty {
-                            Text("Pending Payment Cards (\(vm.pendingPaymentCards.count)):")
+                            Text("待验证支付卡 (\(vm.pendingPaymentCards.count))：")
                                 .fontWeight(.semibold)
                             ForEach(vm.pendingPaymentCards) { card in pendingRow(card) }
                         }
                         if !vm.pendingMembershipCards.isEmpty {
-                            Text("Pending Passes / Memberships (\(vm.pendingMembershipCards.count)):")
+                            Text("待验证凭证 / 会员卡 (\(vm.pendingMembershipCards.count))：")
                                 .fontWeight(.semibold)
                             ForEach(vm.pendingMembershipCards) { card in pendingRow(card) }
                         }
                         if vm.pendingPaymentCards.isEmpty && vm.pendingMembershipCards.isEmpty {
-                            Text("All cached cards on this Mac have been verified.")
+                            Text("此 Mac 上的所有缓存卡片均已验证。")
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -86,7 +86,7 @@ struct WalletDiagnosticsView: View {
                 }
                 .frame(maxHeight: 160)
             } label: {
-                Text(pendingCount > 0 ? "Check missing cards (\(pendingCount))" : "Check missing cards")
+                Text(pendingCount > 0 ? "查看未匹配卡片 (\(pendingCount))" : "查看未匹配卡片")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -103,7 +103,7 @@ struct WalletDiagnosticsView: View {
             Text("…" + card.id.suffix(6))
                 .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
             Spacer()
-            Text("Not verified").foregroundStyle(.secondary)
+            Text("未验证").foregroundStyle(.secondary)
         }
     }
 }
