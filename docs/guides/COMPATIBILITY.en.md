@@ -53,6 +53,24 @@ Use **Successful / Failed / Partially successful / Not tested / Not applicable**
 
 New records should link to their evidence and identify whether they are reporter-tested, an upstream record, or a project claim. Automated tests can verify parsing and error handling; they cannot replace scanning, flashing, or refresh checks on the specified phone.
 
+## Automatic in-app detection (maintainer notes)
+
+AirCard now classifies the connected iPhone's iOS version before any flash. The single source of truth is [`aircard_compat.py`](../../aircard_compat.py); the backend attaches the result to each device as a `compat` object (`status`, `label`, `can_flash`, `message`), and the app shows a status pill in the header plus a banner, and disables the flash buttons when `can_flash` is `false`.
+
+Classification rules:
+
+- iOS **18.0 up to (but not including) 27.2** → `supported`.
+- iOS **27.2.1 and newer** (and any release after the 27.2 line) → `patched`.
+- iOS **below 18.0** → `too_old`.
+- iOS **27.2** exactly (the beta line) → `unknown` unless the exact `BuildVersion` is listed, because betas 1–2 flash but beta 3+ are patched and the beta number is not derivable from the marketing version. A flash attempt (or the `airlift_compatible` probe) resolves it.
+
+To update the table when a new build is confirmed, edit only `aircard_compat.py`:
+
+- Add the exact `BuildVersion` string of a patched 27.2 beta to `PATCHED_BUILDS`, or a confirmed-working one to `SUPPORTED_BUILDS`. The `device_helper` already reports `BuildVersion`; it is passed through `aircard.py` as `build_version`.
+- When a later iOS line becomes the new boundary, adjust `TRANSITION_RELEASE` / `FIRST_PATCHED_RELEASE`.
+
+Run `python3 -m unittest tests.test_compat` after any change.
+
 ## Source references
 
 - [docs/wallet-card-detection.md](../wallet-card-detection.md): validated environment, detection outcome, and test boundaries.

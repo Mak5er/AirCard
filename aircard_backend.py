@@ -51,6 +51,7 @@ from apply_card_skin import (
     DEVICE_HELPER,
 )
 from card_assets import CACHE_FILES, build_card_assets
+from aircard_compat import classify_ios
 from aircard import (
     find_device_helper,
     get_connected_device,
@@ -76,6 +77,7 @@ def cmd_device(target_udid: str | None = None):
             device["airlift_compatible"] = False
     else:
         device["airlift_compatible"] = False
+    device["compat"] = classify_ios(device.get("version"), device.get("build_version"))
     device["connected"] = True
     print(json.dumps(device))
 
@@ -107,9 +109,13 @@ def cmd_devices(target_udid: str | None = None):
             active_device["airlift_compatible"] = False
     else:
         active_device["airlift_compatible"] = False
+    active_device["compat"] = classify_ios(
+        active_device.get("version"), active_device.get("build_version")
+    )
     active_device["connected"] = True
 
     for d in devices:
+        d["compat"] = classify_ios(d.get("version"), d.get("build_version"))
         if d["udid"] == active_device["udid"]:
             d["airlift_compatible"] = active_device.get("airlift_compatible")
 

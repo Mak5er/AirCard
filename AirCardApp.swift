@@ -13,16 +13,32 @@ struct DeviceResponse: Codable {
     var device: DeviceInfo?
 }
 
+struct CompatInfo: Codable, Hashable {
+    var status: String?
+    var label: String?
+    var can_flash: Bool?
+    var message: String?
+    var version: String?
+    var build: String?
+
+    var isPatched: Bool { status == "patched" }
+    var isTooOld: Bool { status == "too_old" }
+    var isSupported: Bool { status == "supported" }
+    var blocksFlashing: Bool { can_flash == false }
+}
+
 struct DeviceInfo: Codable, Identifiable, Hashable {
     var id: String { udid ?? UUID().uuidString }
     var udid: String?
     var name: String?
     var version: String?
+    var build_version: String?
     var product: String?
     var language: String?
     var locale: String?
     var bold_text: Bool?
     var airlift_compatible: Bool?
+    var compat: CompatInfo?
     var connected: Bool
     var error: String?
 
@@ -577,7 +593,30 @@ class AppViewModel: ObservableObject {
     @Published var logs: [String] = []
     @Published var showSuccessAlert = false
     @Published var errorMessage: String?
-    
+
+    var flashBlockedByVersion: Bool { device?.compat?.blocksFlashing == true }
+
+    var compatStatusLabel: String {
+        if device?.connected != true { return "Not connected" }
+        if isCheckingDevice { return "Checking…" }
+        return device?.compat?.label ?? "Unverified"
+    }
+
+    var compatStatusColor: Color {
+        guard device?.connected == true else { return .secondary }
+        switch device?.compat?.status {
+        case "supported": return .green
+        case "patched", "too_old": return .red
+        default: return .orange
+        }
+    }
+
+    var flashBlockedMessage: String? {
+        guard flashBlockedByVersion else { return nil }
+        return device?.compat?.message
+            ?? "This iOS version does not support flashing Wallet skins."
+    }
+
     @Published var showAddCardSheet = false
     @Published var manualHashInput = ""
     @Published var showLogs = false
@@ -608,6 +647,32 @@ class AppViewModel: ObservableObject {
         if connectOnLaunch { checkDevice() }
     }
     
+    static func humanizedError(_ raw: String, context: String = "") -> String {
+        let low = raw.lowercased()
+        if low.contains("device_helper_missing") || low.contains("xcode-select") || low.contains("command line tools") {
+            return "AirCard needs Apple's device tools. Open Terminal, run 'xcode-select --install', then reconnect."
+        }
+        if low.contains("no_device") || low.contains("no device") {
+            return "No iPhone was detected. Connect it with a cable and make sure it is powered on."
+        }
+        if low.contains("locked") || low.contains("passcode") {
+            return "The iPhone is locked. Unlock it and keep the screen on, then try again."
+        }
+        if low.contains("trust") || low.contains("pairing") || low.contains("not paired") || low.contains("validatepairing") {
+            return "The iPhone is not trusted. Tap 'Trust' on the iPhone when the prompt appears, then reconnect."
+        }
+        if low.contains("airlift") || low.contains("airtraffic") || low.contains("patched") {
+            return "Apple closed the mechanism AirCard uses on this iOS version, so flashing is not possible here."
+        }
+        if low.contains("wallet") {
+            return "Open the Wallet app on the iPhone and scan the cards, then try again."
+        }
+        if raw.isEmpty {
+            return "An unexpected error occurred. See the Activity Console log for details."
+        }
+        return raw
+    }
+
     func log(_ message: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
@@ -1122,7 +1187,7 @@ class AppViewModel: ObservableObject {
                             self.statusText = "Device detection could not run. See the log."
                             self.errorMessage = errRaw.isEmpty
                                 ? "AirCard could not run its device tools. Check the Activity Console log for details."
-                                : "Device tool error: \(errRaw.prefix(300))"
+                                : AppViewModel.humanizedError(errRaw)
                             self.scannerMessage = "Device check failed. Reconnect and unlock the iPhone, then retry."
                         }
                         if !errRaw.isEmpty {
@@ -1375,6 +1440,10 @@ class AppViewModel: ObservableObject {
             errorMessage = "No iPhone connected."
             return
         }
+        if flashBlockedByVersion {
+            errorMessage = flashBlockedMessage
+            return
+        }
         let allSkinned = cards.filter { $0.isSelected && $0.customImageURL != nil }
         guard !allSkinned.isEmpty else {
             errorMessage = "Please assign a skin image to at least one selected card."
@@ -1623,7 +1692,11 @@ class AppViewModel: ObservableObject {
             errorMessage = "Please connect and trust your iPhone first."
             return
         }
-        
+        if flashBlockedByVersion {
+            errorMessage = flashBlockedMessage
+            return
+        }
+
         isFlashing = true
         showLogs = true
         progress = 0.0
@@ -1853,7 +1926,11 @@ class AppViewModel: ObservableObject {
             errorMessage = "Please connect and trust your iPhone first."
             return
         }
-        
+        if flashBlockedByVersion {
+            errorMessage = flashBlockedMessage
+            return
+        }
+
         guard let stagedURL = PasscodeThemeExporter.stageTemporaryTheme(
             keys: keys,
             language: passcodeLanguageTarget,
@@ -2236,7 +2313,17 @@ struct ContentView: View {
             .background(Color(NSColor.windowBackgroundColor))
             
             Divider()
-            
+
+            if let banner = vm.flashBlockedMessage {
+                compatBanner(message: banner, blocking: true)
+                Divider()
+            } else if vm.device?.connected == true && vm.device?.compat?.status == "unknown" {
+                compatBanner(message: vm.device?.compat?.message
+                             ?? "This iOS version could not be verified. A flash attempt will confirm whether it works.",
+                             blocking: false)
+                Divider()
+            }
+
             // 3. Live Scanner Notice Banner (if active)
             if vm.selectedTab == .walletCards && vm.isScanningCards {
                 scanningNoticeBanner
@@ -2348,6 +2435,29 @@ struct ContentView: View {
     
     // MARK: - Subviews
     
+    private func compatBanner(message: String, blocking: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: blocking ? "lock.slash.fill" : "exclamationmark.triangle.fill")
+                .foregroundColor(blocking ? .red : .orange)
+                .font(.system(size: 15))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(blocking ? "Flashing is not available on this iOS version" : "iOS version not verified")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((blocking ? Color.red : Color.orange).opacity(0.10))
+        .accessibilityElement(children: .combine)
+    }
+
     private var headerView: some View {
         HStack(spacing: 12) {
             Image(systemName: "creditcard.circle.fill")
@@ -2477,7 +2587,27 @@ struct ContentView: View {
             .frame(height: 32)
             .background(Color(NSColor.windowBackgroundColor))
             .cornerRadius(16)
-            
+
+            if vm.device?.connected == true {
+                HStack(spacing: 5) {
+                    Image(systemName: vm.flashBlockedByVersion
+                          ? "exclamationmark.triangle.fill"
+                          : (vm.device?.compat?.isSupported == true ? "checkmark.seal.fill" : "questionmark.circle.fill"))
+                        .font(.system(size: 10))
+                    Text(vm.compatStatusLabel)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .foregroundColor(vm.compatStatusColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(vm.compatStatusColor.opacity(0.14))
+                .clipShape(Capsule())
+                .help(vm.device?.compat?.message ?? "iOS compatibility status")
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("iOS compatibility: \(vm.compatStatusLabel)")
+            }
+
             Button(action: { showCredits = true }) {
                 Label("Credits & Donate", systemImage: "heart.fill")
                     .foregroundColor(.pink)
@@ -3788,7 +3918,7 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.purple)
                         .controlSize(.regular)
-                        .disabled(vm.effectiveCreatorKeys.isEmpty || vm.isFlashing || vm.device?.connected != true)
+                        .disabled(vm.effectiveCreatorKeys.isEmpty || vm.isFlashing || vm.device?.connected != true || vm.flashBlockedByVersion)
                     } else {
                         Button(action: { vm.flashPasscodeTheme() }) {
                             HStack(spacing: 6) {
@@ -3808,7 +3938,7 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.purple)
                         .controlSize(.regular)
-                        .disabled(vm.loadedPasscodeTheme == nil || vm.isFlashing || vm.device?.connected != true)
+                        .disabled(vm.loadedPasscodeTheme == nil || vm.isFlashing || vm.device?.connected != true || vm.flashBlockedByVersion)
                     }
                 } else {
                     Button(action: { vm.applySkin() }) {
@@ -3829,7 +3959,7 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.green)
                     .controlSize(.regular)
-                    .disabled(readyToFlashCount == 0 || vm.isFlashing || vm.device?.connected != true)
+                    .disabled(readyToFlashCount == 0 || vm.isFlashing || vm.device?.connected != true || vm.flashBlockedByVersion)
                 }
             }
             
