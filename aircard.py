@@ -126,6 +126,7 @@ def format_device(device: dict) -> dict:
         "udid": device["udid"],
         "name": device.get("name") or default_name,
         "version": device.get("version") or ("Unknown" if has_product else ""),
+        "build_version": device.get("buildVersion") or device.get("build_version") or "",
         "product": product or "",
         "language": device.get("language") or "en",
         "locale": device.get("locale") or "",
