@@ -4,8 +4,9 @@
 #include <errno.h>
 #include <stdint.h>
 
-// MobileDevice encodes AFC OBJECT_NOT_FOUND (8) in its own error domain.
-static const uint32_t DiagnosticNotFound = 0xe8004008;
+// AFC can return its protocol status directly or the MobileDevice error-domain form.
+static const uint32_t DiagnosticNotFound = 8;
+static const uint32_t DiagnosticEncodedNotFound = 0xe8004008;
 
 static NSDictionary *DiagnosticObject(AFCConnectionRef afc, NSString *path) {
     AFCKeyValueRef info = NULL;
@@ -13,8 +14,9 @@ static NSDictionary *DiagnosticObject(AFCConnectionRef afc, NSString *path) {
     NSMutableDictionary *result = [@{ @"status": @(status) } mutableCopy];
     if (status != 0 || !info) {
         if (info) AFCKeyValueClose(info);
-        result[@"state"] = (uint32_t)status == DiagnosticNotFound
-            ? @"missing" : @"error";
+        BOOL missing = (uint32_t)status == DiagnosticNotFound ||
+            (uint32_t)status == DiagnosticEncodedNotFound;
+        result[@"state"] = missing ? @"missing" : @"error";
         if (status == 0) result[@"reason"] = @"missing AFC metadata";
         return result;
     }
@@ -272,18 +274,19 @@ static NSDictionary *DiagnosticCleanup(AFCConnectionRef afc, NSString *token,
         NSDictionary *before = DiagnosticBooksView(afc);
         if ([before[@"errors"] count]) [errors addObjectsFromArray:before[@"errors"]];
         else if (!DiagnosticBooksMatch(before, root, snapshot, expectedBooks)) conflict = YES;
-        else {
-            DiagnosticRemove(afc, paths[@"link"], NO, 0, errors);
-            DiagnosticRemove(afc, paths[@"control"], NO, 0, errors);
-            DiagnosticRemove(afc, paths[@"source"], YES, 0, errors);
-            NSDictionary *status = DiagnosticStatus(afc, token);
-            BOOL absent = YES, unknown = NO;
-            for (NSString *key in @[ @"source", @"link", @"control" ]) {
-                NSDictionary *object = status[@"objects"][key];
-                if (!DiagnosticIs(object, @"missing")) absent = NO;
-                if (DiagnosticIs(object, @"error")) unknown = YES;
-            }
-            media = absent ? @"verified" : (unknown ? @"unknown" : @"failed");
+        // Media ownership is independent of permission to restore Books.
+        DiagnosticRemove(afc, paths[@"link"], NO, 0, errors);
+        DiagnosticRemove(afc, paths[@"control"], NO, 0, errors);
+        DiagnosticRemove(afc, paths[@"source"], YES, 0, errors);
+        NSDictionary *status = DiagnosticStatus(afc, token);
+        BOOL absent = YES, unknown = NO;
+        for (NSString *key in @[ @"source", @"link", @"control" ]) {
+            NSDictionary *object = status[@"objects"][key];
+            if (!DiagnosticIs(object, @"missing")) absent = NO;
+            if (DiagnosticIs(object, @"error")) unknown = YES;
+        }
+        media = absent ? @"verified" : (unknown ? @"unknown" : @"failed");
+        if (![before[@"errors"] count] && !conflict) {
             NSDictionary *current = DiagnosticBooksView(afc);
             if ([current[@"errors"] count]) [errors addObjectsFromArray:current[@"errors"]];
             else if (![current isEqualToDictionary:before]) conflict = YES;

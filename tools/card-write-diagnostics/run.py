@@ -27,6 +27,16 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def tool_fingerprints():
+    result = {}
+    for path in (ROOT / "build/device_helper", ROOT / "build/airtraffic_host"):
+        result[path.name] = digest(path.read_bytes()) if path.is_file() else "missing"
+    result["source_hashes"] = {str(path.relative_to(ROOT)): digest(path.read_bytes())
+                               for path in (Path(__file__), ROOT / "Sources/device_helper.m",
+                                            ROOT / "Sources/card_write_diagnostics.h") if path.is_file()}
+    return result
+
+
 def command_json(command, timeout):
     """Bound the entire child lifetime, including blocked stdout reads."""
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -223,7 +233,7 @@ class Runner:
         report = {key: self.state.get(key) for key in (
             "outcome", "failure_phase", "media_cleanup", "books_restore", "recovery_required",
             "recovery_conflict", "control_bytes_match", "link_kind", "device_info", "tools", "error",
-            "stage_results")}
+            "stage_results", "recovery_tools")}
         report.update(phase=failure_phase or self.state["phase"], wallet_write_attempted=False,
                       external_payload_write_attempted=False)
         atomic_json(self.directory / "report.json", report)
@@ -255,12 +265,7 @@ class Runner:
         self.save()
         outcome, failed, error = "phase_failed", None, None
         try:
-            tools = {}
-            for path in (self.helper, self.host):
-                tools[path.name] = digest(path.read_bytes()) if path.is_file() else "missing"
-            tools["source_hashes"] = {str(path.relative_to(ROOT)): digest(path.read_bytes())
-                                      for path in (Path(__file__), ROOT / "Sources/device_helper.m",
-                                                   ROOT / "Sources/card_write_diagnostics.h") if path.is_file()}
+            tools = tool_fingerprints()
             self.state["tools"] = tools
             if self.command_runner is command_json and "missing" in tools.values():
                 raise RuntimeError("Build device_helper and airtraffic_host with make first")
@@ -341,6 +346,8 @@ class Runner:
         if not self.state.get("stage_issued"):
             return self.finish(self.state.get("outcome", "phase_failed"))
         self.verify_inputs()
+        self.state["recovery_tools"] = tool_fingerprints()
+        self.save()
         error, failed = None, None
         try:
             self.event("recovery_status")

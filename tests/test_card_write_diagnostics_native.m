@@ -155,10 +155,14 @@ int main(int argc, const char *argv[]) {
         assert(DiagnosticIs(DiagnosticObject(NULL, @"missing"), @"missing"));
         Forced[@"denied"] = @((int)0xe800400a);
         assert(DiagnosticIs(DiagnosticObject(NULL, @"denied"), @"error"));
-        Forced[@"bare-protocol"] = @8;
-        assert(DiagnosticIs(DiagnosticObject(NULL, @"bare-protocol"), @"error"));
+        Forced[@"raw-denied"] = @10;
+        assert(DiagnosticIs(DiagnosticObject(NULL, @"raw-denied"), @"error"));
+        Forced[@"raw-disconnected"] = @11;
+        assert(DiagnosticIs(DiagnosticObject(NULL, @"raw-disconnected"), @"error"));
+        Forced[@"encoded-missing"] = @((int)DiagnosticEncodedNotFound);
+        assert(DiagnosticIs(DiagnosticObject(NULL, @"encoded-missing"), @"missing"));
         assert(![DiagnosticStatus(NULL, @"../outside")[@"ok"] boolValue]);
-        assert(StatCounts.count == 3);
+        assert(StatCounts.count == 5);
 
         Reset();
         OwnNodes();
@@ -199,12 +203,49 @@ int main(int argc, const char *argv[]) {
         assert(Nodes[unknown]);
 
         Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); Dir(@"Books/Sync/Database");
+        root = Snapshot(); expected = Expected(root);
+        OwnNodes();
+        File(@"Books/Books.plist", @"system metadata");
+        File(@"Books/Sync/Books.plist", @"run's Books metadata");
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite", @"system database");
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite-shm", @"system shared memory");
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite-wal", @"system journal");
+        NSDictionary *booksBefore = Nodes.copy;
+        clean = DiagnosticCleanup(NULL, Token, root, expected);
+        assert([clean[@"conflict"] boolValue]);
+        assert([clean[@"mediaCleanup"] isEqual:@"verified"]);
+        assert([clean[@"booksRestore"] isEqual:@"unknown"]);
+        assert([clean[@"recoveryRequired"] boolValue]);
+        assert(Removed.count > 0 && Writes.count == 0);
+        for (NSString *path in Removed) assert(![path hasPrefix:@"Books"]);
+        for (NSString *path in booksBefore)
+            if ([path hasPrefix:@"Books"]) assert([Nodes[path] isEqualToDictionary:booksBefore[path]]);
+
+        Reset();
         root = Snapshot(); expected = Expected(root);
         OwnNodes(); Dir(@"Books"); Dir(@"Books/Sync");
         File(@"Books/Sync/Books.plist", @"unrelated Books metadata");
+        unknown = [DiagnosticPaths(Token)[@"source"] stringByAppendingPathComponent:@"unrelated"];
+        File(unknown, @"preserve concurrent content");
         clean = DiagnosticCleanup(NULL, Token, root, expected);
         assert([clean[@"conflict"] boolValue]);
-        assert(Removed.count == 0 && Writes.count == 0);
+        assert([clean[@"mediaCleanup"] isEqual:@"failed"]);
+        assert(Nodes[unknown]);
+        assert(Writes.count == 0);
+        for (NSString *path in Removed) assert(![path hasPrefix:@"Books"]);
+
+        Reset();
+        root = Snapshot(); expected = Expected(root);
+        OwnNodes();
+        Forced[@"Books"] = @10;
+        clean = DiagnosticCleanup(NULL, Token, root, expected);
+        assert([clean[@"mediaCleanup"] isEqual:@"verified"]);
+        assert([clean[@"booksRestore"] isEqual:@"unknown"]);
+        assert([clean[@"recoveryRequired"] boolValue]);
+        assert([clean[@"errors"] count] > 0);
+        assert(Writes.count == 0);
+        for (NSString *path in Removed) assert(![path hasPrefix:@"Books"]);
 
         Reset();
         root = Snapshot(); expected = Expected(root);

@@ -68,6 +68,11 @@ not traverse the relocated link, or recursively erase an unexpected directory.
 It restores Books only when the current state matches the original snapshot or
 the known change to this run's `Books/Sync/Books.plist`. An unexplained change
 produces a recovery conflict and leaves the snapshot in place.
+Even when Books restoration conflicts, known Media objects can be cleaned
+independently. This can produce `media_cleanup=verified` with
+`books_restore=unknown` and `recovery_required=true`; it does not mean the full
+original Books state was restored. Recovery records its own tool fingerprints
+separately when a fixed helper is used after the original experiment.
 
 `report.json` is the shareable summary: model, iOS build, tool hashes, stage
 statuses, observation, and recovery state. The CLI additionally prints the local
@@ -89,3 +94,24 @@ phone, and passing them is not evidence of real-device link relocation.
 Initial validation on 2026-11-17: offline tests and helper builds passed. A
 read-only device enumeration returned no devices; the Media experiment was not
 started. No patched-iOS real-device success is claimed.
+
+### Real-device follow-up, 2026-11-17
+
+On iPhone 13 (`iPhone14,5`), iOS 27.2 (`24B119`), the staged object was
+`S_IFLNK`, the relocated destination was `S_IFDIR`, and the independent Media
+control text matched exactly: `link_materialized`. This supports the reported
+patch behavior on this device; it does not establish that every possible file
+access method is blocked.
+
+The first preflight revealed that the native AFC call returned raw status `8`
+for nonexistent objects. A read-only root-versus-random-missing control confirmed
+`0` versus `8`; the helper now accepts both raw `8` and its encoded form
+`0xe8004008`, while permission and connection errors remain errors.
+
+Media cleanup was verified. During sync, previously absent tracked Books index
+and database files appeared. Their origin and full restoration were not proven,
+so the recovery guard preserved all Books content and the original snapshot.
+`books_restore` remains `unknown` and `recovery_required` remains `true`; no
+further experiments were attempted. No Wallet resources or external payloads
+were written. The [sanitized report](reports/2026-11-17-iphone13-ios27.2.json)
+retains separate experiment and recovery tool hashes.

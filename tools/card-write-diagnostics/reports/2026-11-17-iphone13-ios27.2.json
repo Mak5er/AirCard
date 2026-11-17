@@ -1,0 +1,199 @@
+{
+  "books_restore": "unknown",
+  "control_bytes_match": true,
+  "device_info": {
+    "buildVersion": "24B119",
+    "productType": "iPhone14,5",
+    "productVersion": "27.2"
+  },
+  "error": null,
+  "external_payload_write_attempted": false,
+  "failure_phase": null,
+  "link_kind": "S_IFDIR",
+  "media_cleanup": "verified",
+  "outcome": "link_materialized",
+  "phase": "cleanup",
+  "recovery_conflict": true,
+  "recovery_required": true,
+  "recovery_tools": {
+    "airtraffic_host": "549afd727c80b1f9fd9942e739d451bb8770cae82bb410aab9f892044355f00d",
+    "device_helper": "00a4413b018ff8932377b23480fb443961f6b3c5cc4a06f34ef48ccc0dedf30a",
+    "source_hashes": {
+      "Sources/card_write_diagnostics.h": "6d4d8571e5ab8964708ab690a0a036c24c4a7074e4a6a7413a21cb99b38264de",
+      "Sources/device_helper.m": "b28382f10685eaff7eae03ef7a7a0c4d3a548fce9a9c5f6e0f5e6705ee96fdfb",
+      "tools/card-write-diagnostics/run.py": "9cb646454a52c984aad0dc778c5cfe651b0ed9792aa2a5d22f660475a40270aa"
+    }
+  },
+  "stage_results": {
+    "cleanup": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 2,
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "observe": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 0,
+      "objects": {
+        "control": {
+          "kind": "S_IFREG",
+          "state": "present",
+          "status": 0
+        },
+        "link": {
+          "kind": "S_IFDIR",
+          "state": "present",
+          "status": 0
+        },
+        "payload": {
+          "state": "missing",
+          "status": 8
+        },
+        "source": {
+          "kind": "S_IFDIR",
+          "state": "present",
+          "status": 0
+        },
+        "stagedLink": {
+          "kind": "S_IFLNK",
+          "state": "present",
+          "status": 0
+        }
+      },
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "preflight": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 0,
+      "objects": {
+        "control": {
+          "state": "missing",
+          "status": 8
+        },
+        "link": {
+          "state": "missing",
+          "status": 8
+        },
+        "payload": {
+          "state": "missing",
+          "status": 8
+        },
+        "source": {
+          "state": "missing",
+          "status": 8
+        },
+        "stagedLink": {
+          "state": "missing",
+          "status": 8
+        }
+      },
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "recovery_status": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 0,
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "snapshot": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 0,
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "snapshotVerified": true,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "stage": {
+      "afcStatus": 0,
+      "archiveSent": true,
+      "booksWritten": true,
+      "connectStatus": 0,
+      "exitCode": 0,
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "sourceObjectsPresent": true,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0,
+      "zipMessageStatus": 0,
+      "zipResponseStatus": 0,
+      "zipServiceStatus": 0
+    },
+    "staged_status": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 0,
+      "objects": {
+        "control": {
+          "state": "missing",
+          "status": 8
+        },
+        "link": {
+          "state": "missing",
+          "status": 8
+        },
+        "payload": {
+          "kind": "S_IFREG",
+          "state": "present",
+          "status": 0
+        },
+        "source": {
+          "kind": "S_IFDIR",
+          "state": "present",
+          "status": 0
+        },
+        "stagedLink": {
+          "kind": "S_IFLNK",
+          "state": "present",
+          "status": 0
+        }
+      },
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "sync": {
+      "exitCode": 0
+    }
+  },
+  "tools": {
+    "airtraffic_host": "549afd727c80b1f9fd9942e739d451bb8770cae82bb410aab9f892044355f00d",
+    "device_helper": "79cdd34c206fc4a05ee68942b69b3bd5e34a8d14dc07e2ded5e6a05c05df4e93",
+    "source_hashes": {
+      "Sources/card_write_diagnostics.h": "715701856811d3714ee0bd9b8d5aa078b0e96708959b3ac326e820bcefb4010b",
+      "Sources/device_helper.m": "b28382f10685eaff7eae03ef7a7a0c4d3a548fce9a9c5f6e0f5e6705ee96fdfb",
+      "tools/card-write-diagnostics/run.py": "0a4a31ce4c3b70bb3bed45fc25f0e32425b0f45588194abbe70f8fda9ec3ce03"
+    }
+  },
+  "wallet_write_attempted": false
+}

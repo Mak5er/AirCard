@@ -62,7 +62,7 @@ class FakeDevice:
 
     @staticmethod
     def missing():
-        return {"state": "missing", "status": 0xE8004008 - (1 << 32)}
+        return {"state": "missing", "status": 8}
 
     @staticmethod
     def present(kind, **extra):
@@ -142,7 +142,7 @@ class FakeDevice:
             return native_result(
                 {
                     "ok": verified,
-                    "mediaCleanup": "verified" if verified else "unknown",
+                    "mediaCleanup": "verified",
                     "booksRestore": "verified" if verified else "unknown",
                     "recoveryRequired": not verified,
                     "conflict": self.cleanup_conflict,
@@ -326,6 +326,7 @@ class CardWriteDiagnosticsTests(unittest.TestCase):
         report = self.runner(fake).run()
         self.assert_recovery_material(report)
         self.assertNotEqual(report["books_restore"], "verified")
+        self.assertEqual(report["media_cleanup"], "verified")
         self.assertNotIn("restore-books", fake.command_names())
 
     def test_two_asset_destinations_are_media_roots_not_external_writes(self):
