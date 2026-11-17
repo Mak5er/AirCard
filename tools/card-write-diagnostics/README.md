@@ -74,6 +74,31 @@ independently. This can produce `media_cleanup=verified` with
 original Books state was restored. Recovery records its own tool fingerprints
 separately when a fixed helper is used after the original experiment.
 
+### Roll back only the diagnostic's own Books input
+
+After reviewing a Books conflict, an explicit, narrower rollback is available:
+
+```sh
+python3 tools/card-write-diagnostics/run.py restore-owned-books \
+  --device YOUR_DEVICE_IDENTIFIER --run-dir "/absolute/path/from/run_dir"
+```
+
+This requires verified sync effects, verified Media cleanup, and unchanged local
+recovery inputs. The native command only handles `Books/Sync/Books.plist` when
+the original snapshot says it was absent and its current bytes still exactly
+match the two assets generated for this run token. It saves and verifies a
+private backup, repeats the state checks, removes that one input, and verifies
+its absence. An originally existing input is unsupported by this narrow path.
+It never modifies the Books index, database, sidecars, other files, or directories.
+
+`owned_books_restore` and `other_books_unchanged` record this limited rollback.
+Even when both are verified, full `books_restore` remains unknown and
+`recovery_required` remains true: preserving unexplained metadata is not a
+restoration of the complete original snapshot. AFC does not provide a verified
+atomic compare-and-delete operation; repeated checks reduce but cannot eliminate
+the race with other device-side activity. Changed or unverifiable state stops
+the operation without an automatic retry.
+
 `report.json` is the shareable summary: model, iOS build, tool hashes, stage
 statuses, observation, and recovery state. The CLI additionally prints the local
 run directory. Do not publish `state.json`, `events.jsonl`, Books snapshots, or
@@ -115,3 +140,13 @@ so the recovery guard preserved all Books content and the original snapshot.
 further experiments were attempted. No Wallet resources or external payloads
 were written. The [sanitized report](reports/2026-11-17-iphone13-ios27.2.json)
 retains separate experiment and recovery tool hashes.
+
+After explicit review of this conflict, the run's 213-byte sync input still
+matched exactly and the original snapshot recorded it as absent. The narrow
+`restore-owned-books` operation saved and verified a private backup, removed
+only that input, and verified its absence. All other tracked Books bytes and
+directory presence/type matched before and after the operation:
+`owned_books_restore=verified`, `other_books_unchanged=true`. The newly appeared
+index/database files were left in place, so full restoration remains unverified
+and the experiment blocker remains active. Offline verification now includes
+25 diagnostic checks and 7 existing card-flash checks.

@@ -229,12 +229,16 @@ class Runner:
             self.state.update(media_cleanup="unknown", books_restore="unknown", recovery_required=True)
             self.event("cleanup", {"errorType": type(exc).__name__})
         self.state["failure_phase"] = failure_phase
+        return self.write_report()
+
+    def write_report(self):
         self.save()
         report = {key: self.state.get(key) for key in (
             "outcome", "failure_phase", "media_cleanup", "books_restore", "recovery_required",
             "recovery_conflict", "control_bytes_match", "link_kind", "device_info", "tools", "error",
-            "stage_results", "recovery_tools")}
-        report.update(phase=failure_phase or self.state["phase"], wallet_write_attempted=False,
+            "stage_results", "recovery_tools", "owned_books_restore", "other_books_unchanged",
+            "owned_books_backup_verified")}
+        report.update(phase=self.state.get("failure_phase") or self.state["phase"], wallet_write_attempted=False,
                       external_payload_write_attempted=False)
         atomic_json(self.directory / "report.json", report)
         return {**report, "run_dir": str(self.directory)}
@@ -327,7 +331,7 @@ class Runner:
         with self.lock():
             return self._recover(run_dir)
 
-    def _recover(self, run_dir):
+    def load_run(self, run_dir):
         self.directory = Path(run_dir).resolve()
         self.state = json.loads((self.directory / "state.json").read_text())
         if (self.state.get("version") != 1 or
@@ -338,6 +342,11 @@ class Runner:
         if any(self.state.get(key) != prefix + token for key, prefix in (
             ("source", "airlift-src-"), ("link", "airlift-link-"), ("control", "airlift-recovered-"))):
             raise ValueError("Invalid generated recovery paths")
+        if self.state.get("stage_issued"):
+            self.verify_inputs()
+
+    def _recover(self, run_dir):
+        self.load_run(run_dir)
         if (not self.state.get("recovery_required", True) and
                 self.state.get("media_cleanup") in ("verified", "not_needed") and
                 self.state.get("books_restore") in ("verified", "not_needed")):
@@ -345,7 +354,6 @@ class Runner:
                     "run_dir": str(self.directory)}
         if not self.state.get("stage_issued"):
             return self.finish(self.state.get("outcome", "phase_failed"))
-        self.verify_inputs()
         self.state["recovery_tools"] = tool_fingerprints()
         self.save()
         error, failed = None, None
@@ -362,19 +370,53 @@ class Runner:
             error, failed = exc, self.state["phase"]
         return self.finish(self.state.get("outcome", "inconclusive"), failed, error)
 
+    def restore_owned_books(self, run_dir):
+        """Explicit, single-file rollback; it never clears global recovery status."""
+        with self.lock():
+            self.load_run(run_dir)
+            if not (self.state.get("stage_result_known") and
+                    self.state.get("sync_completed_verified") and
+                    self.state.get("media_cleanup") == "verified"):
+                raise ValueError("Owned Books rollback requires verified sync and Media cleanup")
+            backup = self.directory / ("owned-books-backup-" + secrets.token_hex(6))
+            backup.mkdir(mode=0o700)
+            self.state.update(recovery_required=True, owned_books_restore="unknown",
+                              other_books_unchanged=None, owned_books_backup_verified=False,
+                              owned_books_backup_dir=str(backup), recovery_tools=tool_fingerprints())
+            self.event("owned_books_restore")
+            try:
+                self.require(self.native("probe"))
+                response = self.native("diagnostic-restore-owned-books", self.state["token"],
+                                       self.directory / "snapshot", self.directory / "Books.plist", backup)
+                operation = response.get("operation", {})
+                verified = (response.get("exitCode") == 0 and response.get("targetGatePassed") and
+                            operation.get("ok") and operation.get("ownedBooksRestore") == "verified" and
+                            operation.get("otherBooksUnchanged") is True)
+                self.state.update(owned_books_restore="verified" if verified else "unknown",
+                                  other_books_unchanged=operation.get("otherBooksUnchanged"),
+                                  owned_books_backup_verified=bool(operation.get("backupVerified")))
+            except (Exception, KeyboardInterrupt) as exc:
+                self.event("owned_books_restore", {"errorType": type(exc).__name__})
+            return self.write_report()
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("run", "recover"):
+    for mode in ("run", "recover", "restore-owned-books"):
         command = subcommands.add_parser(mode)
         command.add_argument("--device", required=True)
-        if mode == "recover":
+        if mode != "run":
             command.add_argument("--run-dir", required=True)
     args = parser.parse_args()
     runner = Runner(args.device)
     try:
-        report = runner.run() if args.mode == "run" else runner.recover(args.run_dir)
+        if args.mode == "run":
+            report = runner.run()
+        elif args.mode == "recover":
+            report = runner.recover(args.run_dir)
+        else:
+            report = runner.restore_owned_books(args.run_dir)
     except (Exception, KeyboardInterrupt) as exc:
         print(json.dumps({"outcome": "phase_failed", "error": type(exc).__name__,
                           "message": str(exc).replace(args.device, "<device>")}))

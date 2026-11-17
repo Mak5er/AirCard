@@ -11,17 +11,20 @@
   "failure_phase": null,
   "link_kind": "S_IFDIR",
   "media_cleanup": "verified",
+  "other_books_unchanged": true,
   "outcome": "link_materialized",
-  "phase": "cleanup",
+  "owned_books_backup_verified": true,
+  "owned_books_restore": "verified",
+  "phase": "owned_books_restore",
   "recovery_conflict": true,
   "recovery_required": true,
   "recovery_tools": {
     "airtraffic_host": "549afd727c80b1f9fd9942e739d451bb8770cae82bb410aab9f892044355f00d",
-    "device_helper": "00a4413b018ff8932377b23480fb443961f6b3c5cc4a06f34ef48ccc0dedf30a",
+    "device_helper": "f7a5da9e002c9ead8fb0e9b447ca340f020aa193ec2fc1512f4df006acb03c24",
     "source_hashes": {
-      "Sources/card_write_diagnostics.h": "6d4d8571e5ab8964708ab690a0a036c24c4a7074e4a6a7413a21cb99b38264de",
-      "Sources/device_helper.m": "b28382f10685eaff7eae03ef7a7a0c4d3a548fce9a9c5f6e0f5e6705ee96fdfb",
-      "tools/card-write-diagnostics/run.py": "9cb646454a52c984aad0dc778c5cfe651b0ed9792aa2a5d22f660475a40270aa"
+      "Sources/card_write_diagnostics.h": "08c10e12de361a2506cf8117aa5c8bf3a3ae407dac0d05fd692b12fd0086282c",
+      "Sources/device_helper.m": "bedf8f79f1fedddc854d22a4bc59861c0d8e5bf0e217a4fbb215a7752434e002",
+      "tools/card-write-diagnostics/run.py": "6315b24ea6975018ccc15f27d7dc9ef1c22e38fde7cffc56b8faf60340165838"
     }
   },
   "stage_results": {
@@ -66,6 +69,17 @@
           "status": 0
         }
       },
+      "serviceStatus": 0,
+      "sessionStatus": 0,
+      "subscribeStatus": 0,
+      "targetGatePassed": true,
+      "targetObserved": 1,
+      "validateStatus": 0
+    },
+    "owned_books_restore": {
+      "afcStatus": 0,
+      "connectStatus": 0,
+      "exitCode": 0,
       "serviceStatus": 0,
       "sessionStatus": 0,
       "subscribeStatus": 0,

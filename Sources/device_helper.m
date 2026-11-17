@@ -1118,6 +1118,12 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[3]],
                     [NSString stringWithUTF8String:argv[4]],
                     [NSString stringWithUTF8String:argv[5]]);
+            } else if ([command isEqual:@"diagnostic-restore-owned-books"] && argc == 7) {
+                operation = DiagnosticRestoreOwnedBooks(session.afc,
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                    [NSString stringWithUTF8String:argv[6]]);
             } else if ([command isEqual:@"snapshot-books"] && argc == 4) {
                 operation = SnapshotBooksState(
                     session.afc, [NSString stringWithUTF8String:argv[3]]);

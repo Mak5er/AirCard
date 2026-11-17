@@ -385,6 +385,55 @@ class CardWriteDiagnosticsTests(unittest.TestCase):
         self.assertTrue(report["recovery_required"])
         self.assertNotEqual(report["media_cleanup"], "verified")
 
+    def test_owned_books_rollback_does_not_clear_global_recovery(self):
+        fake = FakeDevice(cleanup_conflict=True)
+        report = self.runner(fake).run()
+        before = list(fake.calls)
+        restores = []
+
+        def command(command, timeout):
+            if "diagnostic-restore-owned-books" in command:
+                restores.append(command)
+                self.assertTrue(Path(command[-1]).is_dir())
+                return native_result({"ok": True, "ownedBooksRestore": "verified",
+                                      "otherBooksUnchanged": True, "backupVerified": True})
+            return fake(command, timeout)
+
+        result = diagnostics.Runner("test-private-device", self.work_root, command).restore_owned_books(report["run_dir"])
+        self.assertEqual(result["owned_books_restore"], "verified")
+        self.assertTrue(result["other_books_unchanged"])
+        self.assertTrue(result["owned_books_backup_verified"])
+        self.assertTrue(result["recovery_required"])
+        self.assertEqual(result["books_restore"], "unknown")
+        self.assertEqual(len(restores), 1)
+        self.assertEqual(fake.calls[len(before):][0][0][1], "probe")
+        self.assertEqual(fake.command_names().count("stage"), 1)
+        self.assertEqual(fake.command_names().count("sync"), 1)
+
+    def test_owned_books_rollback_rejects_unverified_sync_without_device_calls(self):
+        fake = FakeDevice(sync_exception=subprocess.TimeoutExpired("host", 120))
+        report = self.runner(fake).run()
+        before = list(fake.calls)
+        with self.assertRaisesRegex(ValueError, "verified sync"):
+            self.runner(fake).restore_owned_books(report["run_dir"])
+        self.assertEqual(fake.calls, before)
+
+    def test_owned_books_rollback_failure_preserves_pending_state(self):
+        fake = FakeDevice(cleanup_conflict=True)
+        report = self.runner(fake).run()
+
+        def command(command, timeout):
+            if "diagnostic-restore-owned-books" in command:
+                return native_result({"ok": False, "ownedBooksRestore": "unknown",
+                                      "otherBooksUnchanged": None}, exitCode=2)
+            return fake(command, timeout)
+
+        result = diagnostics.Runner("test-private-device", self.work_root, command).restore_owned_books(report["run_dir"])
+        self.assertEqual(result["owned_books_restore"], "unknown")
+        self.assertTrue(result["recovery_required"])
+        self.assertIsNone(result["other_books_unchanged"])
+        self.assertTrue((Path(result["run_dir"]) / "snapshot/manifest.plist").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

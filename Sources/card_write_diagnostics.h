@@ -315,4 +315,136 @@ static NSDictionary *DiagnosticCleanup(AFCConnectionRef afc, NSString *token,
               @"recoveryRequired": @(!ok), @"conflict": @(conflict), @"errors": errors };
 }
 
+static BOOL DiagnosticExpectedBooks(NSData *data, NSString *token) {
+    if (!DiagnosticPaths(token) || !data.length || data.length > 4096) return NO;
+    id value = [NSPropertyListSerialization propertyListWithData:data
+        options:NSPropertyListImmutable format:nil error:nil];
+    NSString *source = [AIRLIFT_SOURCE_PREFIX stringByAppendingString:token];
+    NSDictionary *expected = @{ @"Books": @[
+        @{ @"Persistent ID": [NSString stringWithFormat:@"../../%@/p0/p1/p2/link", source],
+           @"Item ID": @"1", @"DSID": @"1" },
+        @{ @"Persistent ID": [NSString stringWithFormat:@"../../%@/payload", source],
+           @"Item ID": @"2", @"DSID": @"1" } ] };
+    return [value isKindOfClass:NSDictionary.class] && [value isEqual:expected];
+}
+
+static BOOL DiagnosticOtherBooksUnchanged(NSDictionary *before, NSDictionary *after) {
+    if ([before[@"errors"] count] || [after[@"errors"] count]) return NO;
+    for (NSUInteger index = 0; index < sizeof(TrackedBooksFiles) / sizeof(char *); index++) {
+        NSString *path = [NSString stringWithUTF8String:TrackedBooksFiles[index]];
+        if ([path isEqual:@"Books/Sync/Books.plist"]) continue;
+        NSDictionary *left = before[@"files"][path], *right = after[@"files"][path];
+        if (![left[@"state"] isEqual:right[@"state"]]) return NO;
+        if (DiagnosticIs(left, @"present") &&
+            (![left[@"kind"] isEqual:right[@"kind"]] ||
+             ![left[@"data"] isEqualToData:right[@"data"]])) return NO;
+    }
+    for (NSUInteger index = 0; index < sizeof(TrackedBooksDirectories) / sizeof(char *); index++) {
+        NSString *path = [NSString stringWithUTF8String:TrackedBooksDirectories[index]];
+        NSDictionary *left = before[@"directories"][path], *right = after[@"directories"][path];
+        if (![left[@"state"] isEqual:right[@"state"]]) return NO;
+        // Removing the owned file changes its parent directory's size.
+        if (DiagnosticIs(left, @"present") && ![left[@"kind"] isEqual:right[@"kind"]]) return NO;
+    }
+    return YES;
+}
+
+static BOOL DiagnosticBackupOwnedBooks(NSData *data, NSString *directory, NSMutableArray *errors) {
+    NSFileManager *manager = NSFileManager.defaultManager;
+    NSDictionary *attributes = [manager attributesOfItemAtPath:directory error:nil];
+    if (![attributes[NSFileType] isEqual:NSFileTypeDirectory]) {
+        [errors addObject:@{ @"reason": @"backup directory is not an existing directory" }];
+        return NO;
+    }
+    NSString *path = [directory stringByAppendingPathComponent:@"owned-sync-books.plist"];
+    attributes = [manager attributesOfItemAtPath:path error:nil];
+    if (attributes) {
+        if (![attributes[NSFileType] isEqual:NSFileTypeRegular] ||
+            ![[NSData dataWithContentsOfFile:path] isEqualToData:data]) {
+            [errors addObject:@{ @"reason": @"existing backup is not this run's exact content" }];
+            return NO;
+        }
+    } else {
+        NSError *error = nil;
+        if (![data writeToFile:path options:NSDataWritingWithoutOverwriting error:&error]) {
+            [errors addObject:@{ @"reason": @"owned Books backup write failed",
+                                @"localError": error.localizedDescription ?: @"unknown" }];
+            return NO;
+        }
+    }
+    NSError *error = nil;
+    BOOL privateFile = [manager setAttributes:@{ NSFilePosixPermissions: @0600 }
+                                 ofItemAtPath:path error:&error];
+    attributes = [manager attributesOfItemAtPath:path error:nil];
+    BOOL verified = privateFile && [attributes[NSFileType] isEqual:NSFileTypeRegular] &&
+        [[NSData dataWithContentsOfFile:path] isEqualToData:data];
+    if (!verified) [errors addObject:@{ @"reason": @"owned Books backup could not be verified" }];
+    return verified;
+}
+
+static NSDictionary *DiagnosticRestoreOwnedBooks(AFCConnectionRef afc, NSString *token,
+                                                 NSString *root, NSString *expectedBooksPath,
+                                                 NSString *backupDirectory) {
+    NSString *const target = @"Books/Sync/Books.plist";
+    NSDictionary *snapshot = LoadBooksSnapshot(root);
+    NSData *expected = [NSData dataWithContentsOfFile:expectedBooksPath];
+    NSMutableArray *errors = NSMutableArray.array;
+    NSString *owned = @"unknown";
+    id otherUnchanged = NSNull.null;
+    BOOL backupVerified = NO;
+    NSDictionary *before = nil;
+    if (!snapshot || !DiagnosticExpectedBooks(expected, token)) {
+        [errors addObject:@{ @"reason": @"invalid owned Books recovery inputs" }];
+    } else if ([snapshot[@"files"][target][@"exists"] boolValue]) {
+        // This narrow rollback only removes a newly created input file.
+        [errors addObject:@{ @"reason": @"restoring an originally present Books input is unsupported" }];
+    } else {
+        before = DiagnosticBooksView(afc);
+        if ([before[@"errors"] count]) [errors addObjectsFromArray:before[@"errors"]];
+        else {
+            NSDictionary *object = before[@"files"][target];
+            if (DiagnosticIs(object, @"missing")) {
+                owned = @"verified";
+            } else if (!DiagnosticIs(object, @"present") ||
+                       ![object[@"kind"] isEqual:@"S_IFREG"] ||
+                       ![object[@"data"] isEqualToData:expected]) {
+                [errors addObject:@{ @"reason": @"current Books input is not this run's exact content" }];
+            } else if ((backupVerified = DiagnosticBackupOwnedBooks(expected, backupDirectory, errors))) {
+                NSDictionary *current = DiagnosticBooksView(afc);
+                if ([current[@"errors"] count]) [errors addObjectsFromArray:current[@"errors"]];
+                else if (![current isEqualToDictionary:before])
+                    [errors addObject:@{ @"reason": @"Books changed before owned input rollback" }];
+                else {
+                    NSDictionary *lastObject = DiagnosticDescendant(afc, target);
+                    NSData *lastBytes = DiagnosticRead(afc, target, lastObject, errors);
+                    if (!lastBytes || ![lastBytes isEqualToData:expected]) {
+                        [errors addObject:@{ @"reason": @"owned Books input changed at rollback" }];
+                    } else {
+                        // AFC has no compare-and-swap; recheck immediately before this single unlink.
+                        int status = AFCRemovePath(afc, target.fileSystemRepresentation);
+                        if (status != 0)
+                            [errors addObject:@{ @"path": target, @"removeStatus": @(status) }];
+                        else owned = @"verified";
+                    }
+                }
+            }
+            NSDictionary *after = DiagnosticBooksView(afc);
+            if ([after[@"errors"] count]) {
+                [errors addObjectsFromArray:after[@"errors"]];
+                owned = @"unknown";
+            } else {
+                otherUnchanged = @(DiagnosticOtherBooksUnchanged(before, after));
+                if ([owned isEqual:@"verified"] && !DiagnosticIs(after[@"files"][target], @"missing")) {
+                    owned = @"failed";
+                    [errors addObject:@{ @"reason": @"owned Books input absence was not verified" }];
+                }
+            }
+        }
+    }
+    BOOL ok = [owned isEqual:@"verified"] && [otherUnchanged isEqual:@YES] && errors.count == 0;
+    return @{ @"ok": @(ok), @"ownedBooksRestore": owned,
+              @"otherBooksUnchanged": otherUnchanged, @"backupVerified": @(backupVerified),
+              @"errors": errors };
+}
+
 #endif

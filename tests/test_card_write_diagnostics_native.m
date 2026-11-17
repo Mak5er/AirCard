@@ -5,7 +5,8 @@
 
 static NSMutableDictionary *Nodes, *Forced, *StatCounts;
 static NSMutableArray *Removed, *OpenedDirectories, *Writes;
-static NSString *ChangeOnStat, *ChangeOnRemove;
+static NSString *ChangeOnStat, *ChangeOnRemove, *ChangeOtherOnRemove;
+static NSUInteger ChangeAtStat;
 static NSString *TestRoot;
 static NSString *const Token = @"0123456789abcdef0123";
 
@@ -26,6 +27,8 @@ static void Reset(void) {
     Writes = NSMutableArray.array;
     ChangeOnStat = nil;
     ChangeOnRemove = nil;
+    ChangeOtherOnRemove = nil;
+    ChangeAtStat = 2;
 }
 
 int AFCFileInfoOpen(AFCConnectionRef afc, const char *raw, AFCKeyValueRef *out) {
@@ -34,7 +37,7 @@ int AFCFileInfoOpen(AFCConnectionRef afc, const char *raw, AFCKeyValueRef *out) 
     *out = NULL;
     NSUInteger count = [StatCounts[path] unsignedIntegerValue] + 1;
     StatCounts[path] = @(count);
-    if ([path isEqual:ChangeOnStat] && count == 2) File(path, @"concurrent change");
+    if ([path isEqual:ChangeOnStat] && count == ChangeAtStat) File(path, @"concurrent change");
     if (Forced[path]) return [Forced[path] intValue];
     NSDictionary *node = Nodes[path];
     if (!node) return (int)DiagnosticNotFound;
@@ -121,6 +124,8 @@ int AFCRemovePath(AFCConnectionRef afc, const char *raw) {
     if (!Nodes[path]) return (int)DiagnosticNotFound;
     [Nodes removeObjectForKey:path];
     if ([path isEqual:ChangeOnRemove]) File(@"Books/Sync/Books.plist", @"concurrent change");
+    if ([path isEqual:@"Books/Sync/Books.plist"] && ChangeOtherOnRemove)
+        File(ChangeOtherOnRemove, @"concurrent index change");
     return 0;
 }
 
@@ -135,6 +140,29 @@ static NSString *Expected(NSString *root) {
     NSString *path = [root stringByAppendingPathComponent:@"Books.plist"];
     assert([Bytes(@"run's Books metadata") writeToFile:path atomically:YES]);
     return path;
+}
+static NSString *OwnedExpected(NSString *root, NSString *token) {
+    NSString *source = [AIRLIFT_SOURCE_PREFIX stringByAppendingString:token];
+    NSDictionary *books = @{ @"Books": @[
+        @{ @"Persistent ID": [NSString stringWithFormat:@"../../%@/p0/p1/p2/link", source],
+           @"Item ID": @"1", @"DSID": @"1" },
+        @{ @"Persistent ID": [NSString stringWithFormat:@"../../%@/payload", source],
+           @"Item ID": @"2", @"DSID": @"1" } ] };
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:books
+        format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+    NSString *path = [root stringByAppendingPathComponent:@"owned-expected.plist"];
+    assert([data writeToFile:path options:NSDataWritingWithoutOverwriting error:nil]);
+    return path;
+}
+static NSString *OwnedBackup(NSString *root) {
+    NSString *path = [root stringByAppendingPathComponent:@"owned-backup"];
+    assert([[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:NO
+        attributes:@{ NSFilePosixPermissions: @0700 } error:nil]);
+    return path;
+}
+static void OwnedInput(NSString *expected) {
+    Nodes[@"Books/Sync/Books.plist"] = [@{ @"kind": @"S_IFREG",
+        @"data": [NSData dataWithContentsOfFile:expected] } mutableCopy];
 }
 static void OwnNodes(void) {
     NSDictionary *paths = DiagnosticPaths(Token);
@@ -297,6 +325,113 @@ int main(int argc, const char *argv[]) {
         NSDictionary *snapshot = DiagnosticSnapshot(NULL, root);
         assert(![snapshot[@"ok"] boolValue]);
         assert([snapshot[@"conflict"] boolValue]);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); Dir(@"Books/Sync/Database");
+        root = Snapshot(); expected = OwnedExpected(root, Token);
+        NSString *backup = OwnedBackup(root);
+        OwnedInput(expected);
+        File(@"Books/Books.plist", @"system metadata");
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite", @"system database");
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite-shm", @"system shared memory");
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite-wal", @"system journal");
+        booksBefore = [Nodes copy];
+        NSDictionary *restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert([restored[@"ok"] boolValue]);
+        assert([restored[@"ownedBooksRestore"] isEqual:@"verified"]);
+        assert([restored[@"otherBooksUnchanged"] isEqual:@YES]);
+        assert([restored[@"backupVerified"] boolValue]);
+        assert(!Nodes[@"Books/Sync/Books.plist"]);
+        assert([Removed isEqualToArray:@[ @"Books/Sync/Books.plist" ]] && Writes.count == 0);
+        for (NSString *path in booksBefore)
+            if (![path isEqual:@"Books/Sync/Books.plist"])
+                assert([Nodes[path] isEqualToDictionary:booksBefore[path]]);
+        NSString *backupFile = [backup stringByAppendingPathComponent:@"owned-sync-books.plist"];
+        assert([[NSData dataWithContentsOfFile:backupFile]
+            isEqualToData:[NSData dataWithContentsOfFile:expected]]);
+        [Removed removeAllObjects];
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert([restored[@"ok"] boolValue] && Removed.count == 0 && Writes.count == 0);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); File(@"Books/Sync/Books.plist", @"original metadata");
+        root = Snapshot(); expected = OwnedExpected(root, Token); backup = OwnedBackup(root);
+        OwnedInput(expected);
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue]);
+        assert([restored[@"ownedBooksRestore"] isEqual:@"unknown"]);
+        assert([restored[@"otherBooksUnchanged"] isEqual:NSNull.null]);
+        assert(Removed.count == 0 && Writes.count == 0);
+        assert([Nodes[@"Books/Sync/Books.plist"][@"data"] isEqualToData:[NSData dataWithContentsOfFile:expected]]);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); root = Snapshot();
+        expected = OwnedExpected(root, Token); backup = OwnedBackup(root);
+        File(@"Books/Sync/Books.plist", @"not our input");
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue] && Removed.count == 0 && Writes.count == 0);
+        assert(![[NSFileManager defaultManager] fileExistsAtPath:
+            [backup stringByAppendingPathComponent:@"owned-sync-books.plist"]]);
+
+        Reset();
+        root = Snapshot(); expected = Expected(root); backup = OwnedBackup(root);
+        [StatCounts removeAllObjects];
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue] && StatCounts.count == 0);
+        assert(Removed.count == 0 && Writes.count == 0);
+        expected = OwnedExpected(root, @"ffffffffffffffffffff");
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue] && StatCounts.count == 0);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); root = Snapshot(); expected = OwnedExpected(root, Token);
+        OwnedInput(expected);
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, expected);
+        assert(![restored[@"ok"] boolValue] && ![restored[@"backupVerified"] boolValue]);
+        assert(Removed.count == 0 && Writes.count == 0);
+
+        backup = OwnedBackup(root);
+        backupFile = [backup stringByAppendingPathComponent:@"owned-sync-books.plist"];
+        assert([Bytes(@"unknown local backup") writeToFile:backupFile atomically:YES]);
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue] && ![restored[@"backupVerified"] boolValue]);
+        assert(Removed.count == 0 && Writes.count == 0);
+        assert([[NSData dataWithContentsOfFile:backupFile] isEqualToData:Bytes(@"unknown local backup")]);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); root = Snapshot(); expected = OwnedExpected(root, Token);
+        backup = OwnedBackup(root); OwnedInput(expected);
+        [StatCounts removeAllObjects]; ChangeOnStat = @"Books/Sync/Books.plist";
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue] && [restored[@"backupVerified"] boolValue]);
+        assert(Removed.count == 0 && Writes.count == 0);
+        assert([Nodes[@"Books/Sync/Books.plist"][@"data"] isEqualToData:Bytes(@"concurrent change")]);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); root = Snapshot(); expected = OwnedExpected(root, Token);
+        backup = OwnedBackup(root); OwnedInput(expected);
+        [StatCounts removeAllObjects]; ChangeOnStat = @"Books/Sync/Books.plist"; ChangeAtStat = 3;
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue] && [restored[@"backupVerified"] boolValue]);
+        assert(Removed.count == 0 && Writes.count == 0);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); Dir(@"Books/Sync/Database"); root = Snapshot();
+        expected = OwnedExpected(root, Token); backup = OwnedBackup(root); OwnedInput(expected);
+        File(@"Books/Sync/Database/OutstandingAssets_4.sqlite", @"system database");
+        ChangeOtherOnRemove = @"Books/Sync/Database/OutstandingAssets_4.sqlite";
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue]);
+        assert([restored[@"ownedBooksRestore"] isEqual:@"verified"]);
+        assert([restored[@"otherBooksUnchanged"] isEqual:@NO]);
+
+        Reset();
+        Dir(@"Books"); Dir(@"Books/Sync"); root = Snapshot(); expected = OwnedExpected(root, Token);
+        backup = OwnedBackup(root); OwnedInput(expected); Forced[@"Books"] = @10;
+        restored = DiagnosticRestoreOwnedBooks(NULL, Token, root, expected, backup);
+        assert(![restored[@"ok"] boolValue]);
+        assert([restored[@"otherBooksUnchanged"] isEqual:NSNull.null]);
+        assert(Removed.count == 0 && Writes.count == 0);
         puts("Native diagnostic status, snapshot and guarded cleanup checks passed");
     }
     return 0;
