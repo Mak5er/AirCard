@@ -783,6 +783,8 @@ static BOOL RemoveGeneratedTree(AFCConnectionRef afc,
         !AFCExists(afc, path);
 }
 
+#include "card_write_diagnostics.h"
+
 static NSDictionary *SessionSummary(DeviceSession *session) {
     id productType = session->connected
         ? CFBridgingRelease(AMDeviceCopyValue(
@@ -1107,6 +1109,15 @@ int main(int argc, const char *argv[]) {
                         @([presentPaths containsObject:@"Books/Sync/Books.plist"]),
                     @"booksSyncPlistPresent":
                         @(AFCExists(session.afc, @"Books/Sync/Books.plist")) };
+            } else if ([command isEqual:@"diagnostic-status"] && argc == 4) {
+                operation = DiagnosticStatus(session.afc, [NSString stringWithUTF8String:argv[3]]);
+            } else if ([command isEqual:@"diagnostic-snapshot"] && argc == 4) {
+                operation = DiagnosticSnapshot(session.afc, [NSString stringWithUTF8String:argv[3]]);
+            } else if ([command isEqual:@"diagnostic-cleanup"] && argc == 6) {
+                operation = DiagnosticCleanup(session.afc,
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]]);
             } else if ([command isEqual:@"snapshot-books"] && argc == 4) {
                 operation = SnapshotBooksState(
                     session.afc, [NSString stringWithUTF8String:argv[3]]);
